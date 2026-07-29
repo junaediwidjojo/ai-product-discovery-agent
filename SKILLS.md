@@ -22,6 +22,21 @@ No single skill knows the whole flow; each is independently reusable.
 
 ---
 
+## SKILL 0a - DISCOVERY_NEXT (the facilitator brain)
+- **Purpose:** Given the interview transcript + enterprise evidence + questions-asked, rate per-dimension coverage, estimate overall Discovery Confidence, decide whether to stop, and pick the single best next question a Senior PM would ask. Flags duplicates/conflicts/ambiguities.
+- **Input:** `P_TRANSCRIPT STRING`, `P_EVIDENCE STRING`, `P_ASKED INT`.
+- **Output:** VARIANT `{coverage:{8 dims}, confidence, stop, question, why, options[], detected[]}`.
+- **Snowflake services:** AISQL `AI_COMPLETE(mistral-large2)`.
+- **Reasoning:** Senior-PM prompt; challenge assumptions, uncover hidden requirements; stop at confidence >= 78 or 8 questions.
+- **Example:** `CALL DISCOVERY.DISCOVERY_NEXT('<transcript>','<evidence>',3)` -> next question + confidence + duplicate flag.
+
+## SKILL 0b - DISCOVERY_ARTIFACTS
+- **Purpose:** Synthesize the PM-ready business brief from the transcript (not a technical spec); mark gaps as open questions.
+- **Input:** `P_TRANSCRIPT STRING`, `P_EVIDENCE STRING`.
+- **Output:** VARIANT `{problem_statement, business_goal, stakeholders[], personas[], current_workflow, pain_points[], success_metrics[], assumptions[], constraints[], risks[], open_questions[], scope[], out_of_scope[]}`.
+- **Snowflake services:** AISQL.
+- **Example:** `CALL DISCOVERY.DISCOVERY_ARTIFACTS('<transcript>','<evidence>')` -> populated discovery brief.
+
 ## SKILL 1 - QUANTIFY_IMPACT
 - **Purpose:** Turn a fuzzy ask into defensible numbers (return rate, refund $, top reasons).
 - **Input:** `P_TOPIC STRING`.

@@ -4,10 +4,11 @@
 **Category:** AI-Native Data Application
 
 ## One-liner
-A Product Manager mediator that turns a plain business request (e.g. "I want refunds") into an
-evidence-grounded recommendation, mock interface, PRD, and engineering tasks - by orchestrating
-reusable Snowflake-native skills over enterprise DATA + CODE + DOCS + COMMUNITY. Not a chatbot,
-not basic RAG.
+An AI Product Discovery Facilitator: a Senior-PM persona that interviews a business stakeholder
+(grounded in enterprise knowledge), tracks per-dimension coverage + Discovery Confidence, and
+produces a PM-ready business brief - so a PM can plan without multiple discovery meetings.
+Downstream artifacts (RICE, mock, PRD, tasks) unlock only after PM approval. Discovery is the
+product; the PRD is an artifact. Not a chatbot, not basic RAG.
 
 ## Architecture (all Snowflake-native)
 - **Operational plane** `PM_MEDIATOR.MOCK` - 68 commerce tables + synthesized refund domain; `COMMERCE_SV` semantic view.

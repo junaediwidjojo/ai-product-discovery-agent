@@ -1,9 +1,12 @@
-"""AI Product Discovery Agent - Discovery Workbench (Streamlit in Snowflake).
+"""AI Product Discovery Facilitator - Discovery Workbench (Streamlit in Snowflake).
 
-Conversation-that-grows PM mediator: quantifies impact (COMMERCE_SV), grounds it in
-code/docs/community (KNOWLEDGE_SEARCH), asks a clarifying question when needed, scores the
-opportunity, renders a DATA-GROUNDED existing-vs-proposed mock interface, and generates a
-grounded PRD + engineering tasks. Written for older Streamlit-in-Snowflake (no chat_input/status).
+A Senior-PM persona that INTERVIEWS a business stakeholder before a PM gets involved.
+It asks one question at a time, grounds questions in enterprise knowledge (similar past
+requests, docs, tickets), tracks per-dimension coverage + an overall Discovery Confidence,
+builds business artifacts incrementally, and only unlocks PRD/mock/tasks after PM approval.
+Discovery is the product; the PRD is a downstream artifact.
+
+Written for older Streamlit-in-Snowflake (no chat_input/status/rerun).
 """
 import json
 import uuid
@@ -14,13 +17,19 @@ from snowflake.snowpark.context import get_active_session
 
 session = get_active_session()
 MODEL = "mistral-large2"
+CONF_THRESHOLD = 78
+MAX_Q = 8
+DIMS = [("business_goal", "Business Goal"), ("stakeholders", "Stakeholders"),
+        ("current_workflow", "Current Workflow"), ("frequency", "Frequency"),
+        ("success_metrics", "Success Metrics"), ("constraints", "Constraints"),
+        ("assumptions", "Assumptions / Unknowns"), ("alternatives", "Alternatives")]
 
 def _rerun():
     fn = getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None)
     if fn:
         fn()
 
-st.set_page_config(page_title="AI Product Discovery Agent", layout="centered")
+st.set_page_config(page_title="AI Product Discovery Facilitator", layout="wide")
 st.markdown(
     """
     <style>
@@ -32,10 +41,14 @@ st.markdown(
       .stTextInput input, .stTextArea textarea { color:#e6edf3 !important; background:#161b22 !important; }
       .stButton>button { background:#29b5e8; color:#04121b !important; border:0; border-radius:8px; font-weight:700; }
       .stButton>button:hover { background:#5cc9ef; color:#04121b !important; }
-      .pill { display:inline-block; padding:4px 10px; border-radius:12px; background:#12324a;
-              color:#7cc4e8 !important; font-size:0.8rem; margin-right:6px; }
-      .cite { font-size:0.8rem; color:#c7d2de !important; }
-      .evidence { border-left:3px solid #29b5e8; padding:6px 12px; margin:6px 0; background:#161b22; }
+      .qcard { background:#161b22; border:1px solid #223; border-left:3px solid #29b5e8; border-radius:8px; padding:14px 16px; margin:8px 0; }
+      .qtext { font-size:17px; font-weight:700; color:#e6edf3; }
+      .why { font-size:12px; color:#93a4b8; margin-top:4px; }
+      .turn { border-left:2px solid #223; padding:4px 12px; margin:4px 0; }
+      .turn .qa { font-size:12px; color:#93a4b8; }
+      .turn .an { color:#e6edf3; }
+      .pill { display:inline-block; padding:3px 9px; border-radius:12px; background:#12324a; color:#7cc4e8 !important; font-size:0.75rem; margin:2px 4px 2px 0; }
+      .brief b { color:#7cc4e8; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -45,362 +58,313 @@ st.markdown(
 def q(sql, params=None):
     return session.sql(sql, params=params).collect() if params else session.sql(sql).collect()
 
-def ai(prompt):
-    return q("SELECT AI_COMPLETE(?, ?)", [MODEL, prompt])[0][0]
+def _j(v):
+    return json.loads(v) if isinstance(v, str) else v
 
 def detect_topic(ask):
-    a = ask.lower()
+    a = (ask or "").lower()
     if any(k in a for k in ["track", "analytic", "journey", "funnel", "event", "instrument", "conversion", "metric", "dashboard", "report"]):
         return "analytics"
     for c in ["refund", "return", "exchange", "checkout", "payment", "fulfillment", "product", "inventory", "order"]:
         if c in a:
-            return c  # fast path: no model call for common asks
-    out = ai("Classify the request into ONE concept id from "
-             "[analytics,return,refund,exchange,order,payment,fulfillment,checkout,product,inventory]. "
-             "Reply with only the id.\nRequest: " + ask).strip().lower()
-    for c in ["analytics", "refund", "return", "exchange", "checkout", "payment", "fulfillment", "product", "order", "inventory"]:
-        if c in out:
             return c
     return "order"
 
-def get_impact(topic):
-    # Skill: QUANTIFY_IMPACT (topic-aware)
-    raw = q("CALL PM_MEDIATOR.DISCOVERY.QUANTIFY_IMPACT(?)", [topic])[0][0]
-    d = json.loads(raw) if isinstance(raw, str) else raw
-    reasons = [{"reason": r["reason"], "n": r["n"], "val": float(r["val"] or 0)} for r in (d.get("top_reasons") or [])]
-    breakdown = [{"name": b["name"], "val": float(b["val"] or 0)} for b in (d.get("breakdown") or [])]
-    return {"orders": d.get("orders", 0), "returns": d.get("returns", 0), "rate": d.get("return_rate_pct", 0),
-            "refund_total": d.get("refund_total", 0), "reasons": reasons,
-            "metrics": d.get("metrics") or [], "breakdown": breakdown,
-            "breakdown_label": d.get("breakdown_label", "Breakdown")}
-
-def get_product():
-    r = q("""SELECT PRODUCT_TITLE, VARIANT_TITLE, ROUND(UNIT_PRICE,2)
-             FROM PM_MEDIATOR.MOCK.ORDER_LINE_ITEM
-             WHERE PRODUCT_TITLE IS NOT NULL AND UNIT_PRICE IS NOT NULL
-             QUALIFY ROW_NUMBER() OVER (PARTITION BY PRODUCT_TITLE ORDER BY UNIT_PRICE DESC)=1
-             LIMIT 1""")
-    if r:
-        return {"title": r[0][0], "variant": r[0][1] or "Default", "price": f"{float(r[0][2]):.2f}"}
-    return {"title": "Harbor Tee", "variant": "Sand", "price": "75.84"}
-
-def get_sample_order():
-    r = q("""SELECT o.DISPLAY_ID, ROUND(SUM(oi.QUANTITY*li.UNIT_PRICE),2)
-             FROM PM_MEDIATOR.MOCK.ORDERS o
-             JOIN PM_MEDIATOR.MOCK.ORDER_ITEM oi ON oi.ORDER_ID=o.ID
-             JOIN PM_MEDIATOR.MOCK.ORDER_LINE_ITEM li ON li.ID=oi.ITEM_ID
-             GROUP BY o.DISPLAY_ID ORDER BY 2 DESC LIMIT 1""")
-    if not r:
-        return {"display_id": "1001", "total": "149.00", "items": [{"title": "Harbor Tee", "qty": 1, "price": 75.84}]}
-    disp, total = r[0][0], r[0][1]
-    items = q("""SELECT li.PRODUCT_TITLE, oi.QUANTITY, ROUND(li.UNIT_PRICE,2)
-                 FROM PM_MEDIATOR.MOCK.ORDERS o
-                 JOIN PM_MEDIATOR.MOCK.ORDER_ITEM oi ON oi.ORDER_ID=o.ID
-                 JOIN PM_MEDIATOR.MOCK.ORDER_LINE_ITEM li ON li.ID=oi.ITEM_ID
-                 WHERE o.DISPLAY_ID=? AND li.PRODUCT_TITLE IS NOT NULL LIMIT 2""", [disp])
-    return {"display_id": str(disp), "total": f"{float(total):.2f}",
-            "items": [{"title": i[0], "qty": int(i[1]), "price": float(i[2] or 0)} for i in items] or
-                     [{"title": "Item", "qty": 1, "price": float(total or 0)}]}
-
-def search_knowledge(query_text, atype=None, limit=4):
-    payload = {"query": query_text, "columns": ["ARTIFACT_TYPE", "TITLE", "URL", "LINE_START", "LINE_END"], "limit": limit}
-    if atype:
-        payload["filter"] = {"@eq": {"ARTIFACT_TYPE": atype}}
-    raw = q("SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW('PM_MEDIATOR.KNOWLEDGE.KNOWLEDGE_SEARCH', ?)", [json.dumps(payload)])[0][0]
+def retrieve_evidence(query_text, limit=6):
     try:
-        return json.loads(raw).get("results", [])
+        data = _j(q("CALL PM_MEDIATOR.DISCOVERY.RETRIEVE_EVIDENCE(?, ?)", [query_text, limit])[0][0])
     except Exception:
         return []
-
-def score_opportunity(topic):
-    raw = q("CALL PM_MEDIATOR.DISCOVERY.SCORE_OPPORTUNITY(?)", [topic])[0][0]
-    return json.loads(raw) if isinstance(raw, str) else raw
-
-def decide_clarification(ask, topic, impact):
-    # Skill: CLARIFY_NEED (agentic gather-more-needs)
-    ctx = f"return_rate={impact['rate']}%, top_reason={impact['reasons'][0]['reason'] if impact['reasons'] else 'n/a'}"
-    try:
-        raw = q("CALL PM_MEDIATOR.DISCOVERY.CLARIFY_NEED(?,?,?)", [ask, topic, ctx])[0][0]
-        d = json.loads(raw) if isinstance(raw, str) else raw
-        return d or {"clarify": False}
-    except Exception:
-        return {"clarify": False}
-
-def build_evidence(topic, ask):
-    # Skill: RETRIEVE_EVIDENCE (search by the actual request, not a topic template)
-    raw = q("CALL PM_MEDIATOR.DISCOVERY.RETRIEVE_EVIDENCE(?, ?)", [f"{ask} {topic}", 6])[0][0]
-    data = json.loads(raw) if isinstance(raw, str) else raw
-    ev = []
+    out = []
     for r in (data.get("results") or []):
         cite = r.get("TITLE", "")
         if r.get("LINE_START") is not None:
             cite = f"{r.get('TITLE')}:{r.get('LINE_START')}-{r.get('LINE_END')}"
-        ev.append({"source": (r.get("ARTIFACT_TYPE") or "").upper(), "citation": cite, "url": r.get("URL", "")})
-    return ev
+        out.append({"source": (r.get("ARTIFACT_TYPE") or "").upper(), "citation": cite, "url": r.get("URL", "")})
+    return out
 
-# ---------- Data-grounded mock interface ----------
-FEATURES = {
-    "refund":      ("Self-Serve Returns", "Start a return in 2 taps: pick items, choose a reason, get an instant refund.", "Start a return"),
-    "return":      ("Self-Serve Returns", "Start a return in 2 taps: pick items, choose a reason, get an instant refund.", "Start a return"),
-    "exchange":    ("Instant Exchange", "Swap size or color instantly, without waiting for a refund.", "Exchange item"),
-    "checkout":    ("1-Click Checkout", "Saved address and payment for returning customers.", "Buy now"),
-    "product":     ("Size & Fit Guide", "Personalized size recommendation to cut sizing returns.", "Find my size"),
-    "payment":     ("More Pay Options", "Add wallet and buy-now-pay-later at checkout.", "Choose payment"),
-    "fulfillment": ("Live Order Tracking", "Real-time shipment status on the order page.", "Track order"),
-    "inventory":   ("Back-in-Stock Alerts", "Notify me when this variant is restocked.", "Notify me"),
-    "order":       ("Order Self-Service", "Manage, return, or track an order without contacting support.", "Manage order"),
-    "analytics":   ("Journey Tracker", "Instrument each step of the order journey so every stage is measurable.", "View funnel"),
-}
+def evidence_str(ev):
+    return "; ".join(f"[{e['source']}] {e['citation']}" for e in ev)[:1000]
 
+def transcript_str(idea, turns):
+    s = "Stakeholder's initial idea: " + idea + "\n"
+    for t in turns:
+        s += "AI: " + t["q"] + "\nStakeholder: " + t["a"] + "\n"
+    return s
+
+def discovery_next(transcript, ev, asked):
+    return _j(q("CALL PM_MEDIATOR.DISCOVERY.DISCOVERY_NEXT(?,?,?)", [transcript, ev, asked])[0][0]) or {}
+
+def discovery_artifacts(transcript, ev):
+    return _j(q("CALL PM_MEDIATOR.DISCOVERY.DISCOVERY_ARTIFACTS(?,?)", [transcript, ev])[0][0]) or {}
+
+def save_session(sid, idea, status, confidence):
+    q("DELETE FROM PM_MEDIATOR.DISCOVERY.DISCOVERY_SESSION WHERE SESSION_ID=?", [sid])
+    q("INSERT INTO PM_MEDIATOR.DISCOVERY.DISCOVERY_SESSION (SESSION_ID,ASK_TEXT,STATUS,CONFIDENCE) VALUES (?,?,?,?)",
+      [sid, idea, status, float(confidence or 0)])
+
+def save_turn(sid, seq, question, answer):
+    q("INSERT INTO PM_MEDIATOR.DISCOVERY.DISCOVERY_TURN (SESSION_ID,SEQ,ROLE,QUESTION,ANSWER) VALUES (?,?,?,?,?)",
+      [sid, seq, "qa", question, answer])
+
+def save_artifacts(sid, artifacts):
+    q("DELETE FROM PM_MEDIATOR.DISCOVERY.DISCOVERY_ARTIFACT WHERE SESSION_ID=?", [sid])
+    for k, v in artifacts.items():
+        content = v if isinstance(v, str) else json.dumps(v)
+        q("INSERT INTO PM_MEDIATOR.DISCOVERY.DISCOVERY_ARTIFACT (SESSION_ID,ARTIFACT_TYPE,CONTENT) VALUES (?,?,?)",
+          [sid, k, content])
+
+# ---------- Post-approval artifact helpers (reused) ----------
 def esc(s):
     return _html.escape(str(s))
 
-def _shell(addr, body_inner, label, klass):
-    return ("<div class='col'><div class='tag " + klass + "'>" + label + "</div>"
-            "<div class='dev'><div class='bar'><span class='dot'></span><span class='dot'></span>"
-            "<span class='dot'></span><span class='addr'>" + esc(addr) + "</span></div>"
-            "<div class='body'>" + body_inner + "</div></div></div>")
+def score_rice(topic):
+    return _j(q("CALL PM_MEDIATOR.DISCOVERY.SCORE_RICE(?)", [topic])[0][0])
 
-def _product_inner(product, extra):
-    return ("<div class='hero'>PRODUCT IMAGE</div>"
-            "<div class='crumb'>Home / Apparel / " + esc(product['title']) + "</div>"
-            "<div class='ttl'>" + esc(product['title']) + "</div>"
-            "<div class='price'>$" + esc(product['price']) + "</div>"
-            "<div class='var'>Variant: <b>" + esc(product['variant']) + "</b></div>"
-            "<button class='cart'>Add to cart</button>" + extra)
+def generate_prd(sid, subject, ctx):
+    return q("CALL PM_MEDIATOR.DISCOVERY.GENERATE_PRD(?,?,?)", [sid, subject, ctx])[0][0]
 
-def _order_rows(order):
-    parts = []
-    for i in order['items']:
-        parts.append("<div class='row'><span>" + esc(i['title']) + " x" + str(i['qty']) +
-                     "</span><span>$" + f"{i['price']:.2f}" + "</span></div>")
-    return "".join(parts)
+def create_tasks(sid, prd):
+    return q("CALL PM_MEDIATOR.DISCOVERY.CREATE_TASKS(?,?)", [sid, prd])[0][0]
 
-def _order_inner(order, extra):
-    return ("<div class='ohead'>Order #" + esc(order['display_id']) +
-            " <span class='badge2'>Delivered</span></div>" + _order_rows(order) +
-            "<div class='row total'><span>Total</span><span>$" + esc(order['total']) + "</span></div>"
-            "<div class='sec'>Need help?</div>" + extra)
-
-def _checkout_inner(order, extra):
-    steps = ("<div class='step done'>1 Address</div><div class='step done'>2 Delivery</div>"
-             "<div class='step cur'>3 Payment</div><div class='step'>4 Review</div>")
-    return ("<div class='ttl'>Checkout</div><div class='steps'>" + steps + "</div>"
-            "<div class='row total'><span>Order total</span><span>$" + esc(order['total']) + "</span></div>"
-            "<button class='cart'>Pay now</button>" + extra)
-
-def propose_feature(topic, ask, evidence):
-    # Skill: PROPOSE_FEATURE (evidence-grounded feature design)
-    ev = "; ".join(f"[{e['source']}] {e['citation']}" for e in evidence)[:800]
-    fb = FEATURES.get(topic, ("AI Assist", "An AI-guided improvement for " + topic + ".", "Try it"))
-    try:
-        raw = q("CALL PM_MEDIATOR.DISCOVERY.PROPOSE_FEATURE(?,?,?)", [topic, ask, ev])[0][0]
-        d = json.loads(raw) if isinstance(raw, str) else raw
-        if not d:
-            return fb
-        return (d.get("title") or fb[0], d.get("desc") or fb[1], d.get("cta") or "Try it")
-    except Exception:
-        return fb
-
-def build_mockup(topic, product, order, feat, code_ref=""):
-    proposed_extra = ("<div class='newmod'><span class='badge'>NEW</span>"
-                      "<div class='fh'>" + esc(feat[0]) + "</div>"
-                      "<div class='fd'>" + esc(feat[1]) + "</div>"
-                      "<button class='cta'>" + esc(feat[2]) + "</button></div>")
-    if topic in ("product", "inventory"):
-        addr = "medusastore.com/products/" + esc(product['title'].lower().replace(' ', '-'))
-        ex = _shell(addr, _product_inner(product, "<div class='muted'>Ships in 3-5 days. Returns via support only.</div>"), "Existing", "old")
-        pr = _shell(addr, _product_inner(product, proposed_extra), "Proposed", "new")
-    elif topic in ("checkout", "payment"):
-        addr = "medusastore.com/checkout"
-        ex = _shell(addr, _checkout_inner(order, "<div class='muted'>Guest checkout, manual address entry.</div>"), "Existing", "old")
-        pr = _shell(addr, _checkout_inner(order, proposed_extra), "Proposed", "new")
-    else:
-        addr = "medusastore.com/account/orders/" + esc(order['display_id'])
-        ex = _shell(addr, _order_inner(order, "<div class='muted'>Returns &amp; Exchanges &rarr; <a href='#'>contact support</a></div>"), "Existing", "old")
-        pr = _shell(addr, _order_inner(order, proposed_extra), "Proposed", "new")
-    body = ex + pr
-    css = """
-      <style>
-        * { box-sizing:border-box; font-family:-apple-system,Segoe UI,Roboto,sans-serif; }
-        body { margin:0; background:#eef2f6; }
-        .wrap { display:flex; gap:16px; padding:12px; }
-        .col { flex:1; }
-        .tag { font-weight:700; font-size:13px; margin:0 0 6px 4px; color:#64748b; }
-        .tag.new { color:#11567f; }
-        .dev { background:#fff; border:1px solid #dbe4ec; border-radius:12px; overflow:hidden;
-               box-shadow:0 4px 14px rgba(17,86,127,.06); }
-        .bar { background:#f1f5f9; padding:8px 10px; display:flex; align-items:center; gap:6px; }
-        .dot { width:9px; height:9px; border-radius:50%; background:#cbd5e1; display:inline-block; }
-        .addr { margin-left:8px; font-size:11px; color:#94a3b8; }
-        .body { padding:14px; }
-        .hero { height:120px; border-radius:10px; color:#fff; display:flex; align-items:center;
-                justify-content:center; font-weight:700; letter-spacing:2px;
-                background:linear-gradient(135deg,#29b5e8,#11567f); }
-        .crumb { font-size:11px; color:#94a3b8; margin-top:12px; }
-        .ttl { font-size:20px; font-weight:800; color:#0f172a; margin-top:2px; }
-        .price { font-size:18px; color:#11567f; font-weight:700; margin-top:4px; }
-        .var { font-size:13px; color:#475569; margin:8px 0; }
-        .cart { width:100%; padding:11px; border:0; border-radius:9px; background:#0f172a; color:#fff;
-                font-weight:600; cursor:pointer; }
-        .muted { font-size:12px; color:#94a3b8; margin-top:12px; }
-        .newmod { margin-top:12px; padding:12px; border:2px solid #29b5e8; border-radius:10px;
-                  background:#f0f9ff; position:relative; }
-        .badge { position:absolute; top:-10px; right:10px; background:#29b5e8; color:#fff;
-                 font-size:10px; font-weight:700; padding:2px 8px; border-radius:8px; }
-        .fh { font-weight:700; color:#11567f; }
-        .fd { font-size:12px; color:#475569; margin:4px 0 8px; }
-        .cta { width:100%; padding:10px; border:0; border-radius:9px; background:#29b5e8; color:#fff;
-               font-weight:700; cursor:pointer; }
-        .ohead { font-size:16px; font-weight:800; color:#0f172a; display:flex; justify-content:space-between; align-items:center; }
-        .badge2 { font-size:10px; background:#dcfce7; color:#166534; padding:2px 8px; border-radius:8px; font-weight:700; }
-        .row { display:flex; justify-content:space-between; font-size:13px; color:#334155; padding:6px 0; border-bottom:1px solid #f1f5f9; }
-        .row.total { font-weight:800; color:#0f172a; border-bottom:0; margin-top:4px; }
-        .sec { font-weight:700; color:#0f172a; margin-top:12px; font-size:13px; }
-        .steps { display:flex; gap:6px; margin:12px 0; }
-        .step { flex:1; font-size:11px; text-align:center; padding:6px 2px; border-radius:6px; background:#f1f5f9; color:#94a3b8; }
-        .step.done { background:#e6f2fb; color:#11567f; }
-        .step.cur { background:#11567f; color:#fff; }
-        .codref { padding:8px 14px; font-size:11px; color:#64748b; }
-      </style>"""
-    footer = ("<div class='codref'>Existing behavior grounded in code: " + esc(code_ref) + "</div>") if code_ref else ""
-    return "<!doctype html><html><head>" + css + "</head><body><div class='wrap'>" + body + "</div>" + footer + "</body></html>"
-
-def persist(session_id, ask, topic, impact, evidence, score):
-    q("INSERT INTO PM_MEDIATOR.DISCOVERY.DISCOVERY_SESSION (SESSION_ID,ASK_TEXT,STATUS,OPPORTUNITY_SCORE) VALUES (?,?,?,?)",
-      [session_id, ask, "complete", score["opportunity_score"]])
-    for e in evidence:
-        q("INSERT INTO PM_MEDIATOR.DISCOVERY.EVIDENCE (EVIDENCE_ID,SESSION_ID,SOURCE_TYPE,SNIPPET,CITATION,URL) VALUES (?,?,?,?,?,?)",
-          [str(uuid.uuid4()), session_id, e["source"], e["citation"], e["citation"], e["url"]])
-    q("INSERT INTO PM_MEDIATOR.DISCOVERY.IMPACT (IMPACT_ID,SESSION_ID,METRIC_NAME,METRIC_VALUE,UNIT,SQL_USED) VALUES (?,?,?,?,?,?)",
-      [str(uuid.uuid4()), session_id, "return_rate_pct", float(impact["rate"] or 0), "percent", "COMMERCE_SV"])
-
-# ---------- Orchestration ----------
-st.title("AI Product Discovery Agent")
-st.caption("Type a business request. I quantify it, ground it in code/docs/community, mock the interface, and produce engineering-ready output - all in Snowflake.")
-
+# ---------- Discovery state machine ----------
 if "phase" not in st.session_state:
-    st.session_state.phase = "input"
+    st.session_state.phase = "idea"
 
-def run_discovery(ask, clarification=None):
+def coverage_rail(ss):
+    st.markdown("### Discovery progress")
+    conf = int(ss.get("confidence", 0) or 0)
+    st.metric("Discovery Confidence", f"{conf}%")
+    st.progress(min(1.0, conf / 100.0))
+    cov = ss.get("coverage", {}) or {}
+    for key, label in DIMS:
+        v = int(cov.get(key, 0) or 0)
+        st.caption(f"{label} - {v}%")
+        st.progress(min(1.0, v / 100.0))
+
+def evidence_panel(ss):
+    ev = ss.get("evidence", [])
+    with st.expander(f"Enterprise knowledge found ({len(ev)})", expanded=False):
+        if not ev:
+            st.caption("No related items found yet.")
+        for e in ev:
+            link = f" - [{e['url']}]({e['url']})" if e["url"] else ""
+            st.markdown(f"<span class='pill'>{e['source']}</span> {e['citation']}{link}", unsafe_allow_html=True)
+        det = (ss.get("next") or {}).get("detected") or []
+        if det:
+            st.markdown("**Detected:** " + "; ".join(det))
+
+def start_discovery(idea):
     ss = st.session_state
-    ss.ask = ask
-    with st.spinner("Interpreting request..."):
-        ss.topic = detect_topic(ask)
-    with st.spinner("Quantifying business impact (Cortex Analyst / COMMERCE_SV)..."):
-        ss.impact = get_impact(ss.topic)
-    with st.spinner("Gathering cited evidence (Cortex Search)..."):
-        ss.evidence = build_evidence(ss.topic, ask)
-        ss.product = get_product()
-    if clarification is None:
-        d = decide_clarification(ask, ss.topic, ss.impact)
-        if d.get("clarify"):
-            ss.clarify = d
-            ss.phase = "clarify"
-            return
-    ss.clarification = clarification
-    with st.spinner("Scoring the opportunity..."):
-        ss.score = score_opportunity(ss.topic)
-    with st.spinner("Designing the proposed feature and building a topic-aware mock..."):
-        feat = propose_feature(ss.topic, ask, ss.evidence)
-        ss.feat_title = feat[0]
-        ss.order = get_sample_order()
-        code_ref = next((e["citation"] for e in ss.evidence if "CODE" in (e.get("source") or "")), "")
-        ss.mock_screen = {"product": "product page", "inventory": "product page",
-                          "checkout": "checkout page", "payment": "checkout page"}.get(ss.topic, "order page")
-        ss.mockup = build_mockup(ss.topic, ss.product, ss.order, feat, code_ref)
+    ss.idea = idea
+    ss.topic = detect_topic(idea)
+    ss.turns = []
+    ss.asked = 0
     ss.session_id = str(uuid.uuid4())[:12]
-    ss.clar_ctx = f" Stakeholder input: {clarification}." if clarification else ""
+    with st.spinner("Scanning enterprise knowledge for similar initiatives..."):
+        ss.evidence = retrieve_evidence(idea)
+    with st.spinner("Preparing the discovery interview..."):
+        nxt = discovery_next(transcript_str(idea, ss.turns), evidence_str(ss.evidence), 0)
+    ss.next = nxt
+    ss.coverage = nxt.get("coverage", {})
+    ss.confidence = nxt.get("confidence", 0)
     try:
-        persist(ss.session_id, ask, ss.topic, ss.impact, ss.evidence, ss.score)
+        save_session(ss.session_id, idea, "in_discovery", ss.confidence)
     except Exception as e:
         st.warning(f"Persistence skipped: {e}")
-    ss.phase = "done"
+    ss.phase = "interview"
 
-if st.session_state.phase == "input":
-    ask = st.text_input("Business request", placeholder="e.g. I want refunds  /  improve the product page", key="ask_box")
-    if st.button("Run discovery") and ask:
-        run_discovery(ask)
+def submit_answer(answer):
+    ss = st.session_state
+    question = (ss.get("next") or {}).get("question", "")
+    ss.turns.append({"q": question, "a": answer})
+    ss.asked += 1
+    try:
+        save_turn(ss.session_id, ss.asked, question, answer)
+    except Exception:
+        pass
+    tr = transcript_str(ss.idea, ss.turns)
+    with st.spinner("Listening and deciding the next question..."):
+        nxt = discovery_next(tr, evidence_str(ss.evidence), ss.asked)
+    ss.next = nxt
+    ss.coverage = nxt.get("coverage", ss.coverage)
+    ss.confidence = nxt.get("confidence", ss.confidence)
+    try:
+        save_session(ss.session_id, ss.idea, "in_discovery", ss.confidence)
+    except Exception:
+        pass
+    if nxt.get("stop") or ss.asked >= MAX_Q or int(ss.confidence or 0) >= CONF_THRESHOLD:
+        build_summary()
+
+def build_summary():
+    ss = st.session_state
+    tr = transcript_str(ss.idea, ss.turns)
+    with st.spinner("Synthesizing the discovery brief..."):
+        ss.artifacts = discovery_artifacts(tr, evidence_str(ss.evidence))
+    try:
+        save_artifacts(ss.session_id, ss.artifacts)
+        save_session(ss.session_id, ss.idea, "summarized", ss.confidence)
+    except Exception:
+        pass
+    ss.phase = "summary"
+
+# ================= PHASE: IDEA =================
+st.title("AI Product Discovery Facilitator")
+st.caption("Describe a business pain in plain words. I run the discovery interview a Senior PM would - so a PM can plan without multiple meetings.")
+
+if st.session_state.phase == "idea":
+    with st.form("idea_form"):
+        idea = st.text_input("What business problem or idea is on your mind?",
+                             placeholder="e.g. Customers keep asking for refunds and support is overwhelmed", key="idea_box")
+        go = st.form_submit_button("Start discovery")
+    if go and idea:
+        start_discovery(idea)
         _rerun()
 
-if st.session_state.phase == "clarify":
+# ================= PHASE: INTERVIEW =================
+elif st.session_state.phase == "interview":
     ss = st.session_state
-    st.markdown(f"**You asked:** {ss.ask}")
-    st.info("I need one detail to scope this well.")
-    st.markdown(f"**{ss.clarify['question']}**")
-    opts = (ss.clarify.get("options") or ["Yes", "No"]) + ["Something else (type below)"]
-    choice = st.radio("Choose one:", opts, key="clar_choice")
-    custom = st.text_input("Or type your own answer (optional):", key="clar_custom")
-    if st.button("Continue"):
-        answer = custom.strip() if custom.strip() else choice
-        run_discovery(ss.ask, clarification=answer)
+    left, right = st.columns([2, 1])
+    with right:
+        coverage_rail(ss)
+        evidence_panel(ss)
+    with left:
+        st.markdown(f"**Idea:** {ss.idea}")
+        for t in ss.turns:
+            st.markdown(f"<div class='turn'><div class='qa'>{esc(t['q'])}</div>"
+                        f"<div class='an'>{esc(t['a'])}</div></div>", unsafe_allow_html=True)
+        nxt = ss.get("next") or {}
+        qn = nxt.get("question", "Tell me more about the problem.")
+        st.markdown(f"<div class='qcard'><div class='qtext'>{esc(qn)}</div>"
+                    f"<div class='why'>{esc(nxt.get('why',''))}</div></div>", unsafe_allow_html=True)
+        opts = (nxt.get("options") or [])
+        SENTINEL = "(type my own answer below)"
+        with st.form("answer_form", clear_on_submit=True):
+            picked = st.radio("Quick answer (optional):", [SENTINEL] + opts, key="pick") if opts else None
+            typed = st.text_input("Your answer", key="ans_box")
+            c1, c2 = st.columns(2)
+            submitted = c1.form_submit_button("Answer")
+            enough = c2.form_submit_button("I have enough - summarize")
+        if submitted:
+            ans = (typed or "").strip()
+            if not ans and picked and picked != SENTINEL:
+                ans = picked
+            if ans:
+                submit_answer(ans)
+                _rerun()
+        if enough:
+            build_summary()
+            _rerun()
+
+# ================= PHASE: SUMMARY =================
+elif st.session_state.phase == "summary":
+    ss = st.session_state
+    a = ss.get("artifacts", {}) or {}
+    st.subheader("Discovery Summary")
+    st.metric("Discovery Confidence", f"{int(ss.get('confidence',0) or 0)}%")
+
+    def block(title, val):
+        if not val:
+            return
+        if isinstance(val, list):
+            st.markdown(f"<div class='brief'><b>{title}</b></div>", unsafe_allow_html=True)
+            for x in val:
+                st.markdown(f"- {x}")
+        else:
+            st.markdown(f"<div class='brief'><b>{title}</b><br/>{esc(val)}</div>", unsafe_allow_html=True)
+
+    block("Business Problem", a.get("problem_statement"))
+    block("Business Goal", a.get("business_goal"))
+    block("Stakeholders", a.get("stakeholders"))
+    block("Personas", a.get("personas"))
+    block("Current Workflow", a.get("current_workflow"))
+    block("Pain Points", a.get("pain_points"))
+    block("Success Metrics", a.get("success_metrics"))
+    block("Assumptions", a.get("assumptions"))
+    block("Constraints", a.get("constraints"))
+    block("Risks", a.get("risks"))
+    block("Open Questions", a.get("open_questions"))
+    block("Scope", a.get("scope"))
+    block("Out of Scope", a.get("out_of_scope"))
+
+    c1, c2 = st.columns(2)
+    if c1.button("Send to Product Manager"):
+        ss.phase = "pm_review"
+        _rerun()
+    if c2.button("Resume interview"):
+        ss.phase = "interview"
         _rerun()
 
-if st.session_state.phase == "done":
+# ================= PHASE: PM REVIEW =================
+elif st.session_state.phase == "pm_review":
     ss = st.session_state
-    st.markdown(f"**You asked:** {ss.ask}")
-    st.markdown(f"<span class='pill'>topic: {ss.topic}</span>"
-                + (f"<span class='pill'>scoped: {ss.clarification}</span>" if ss.get('clarification') else ""),
-                unsafe_allow_html=True)
+    a = ss.get("artifacts", {}) or {}
+    st.subheader("Product Manager Review")
+    st.info("Review the discovery brief. Approving unlocks downstream artifacts (RICE, mock, PRD, tasks).")
+    st.markdown(f"**Problem:** {a.get('problem_statement','')}")
+    st.markdown(f"**Goal:** {a.get('business_goal','')}")
+    st.markdown(f"**Confidence:** {int(ss.get('confidence',0) or 0)}%")
+    if a.get("open_questions"):
+        st.markdown("**Still open:** " + "; ".join(a["open_questions"]))
+    c1, c2 = st.columns(2)
+    if c1.button("Approve discovery"):
+        try:
+            save_session(ss.session_id, ss.idea, "pm_approved", ss.confidence)
+        except Exception:
+            pass
+        ss.phase = "approved"
+        _rerun()
+    if c2.button("Send back to discovery"):
+        ss.phase = "interview"
+        _rerun()
 
-    st.subheader("1. Business impact")
-    import pandas as pd
-    mets = ss.impact.get("metrics") or []
-    if mets:
-        cols = st.columns(len(mets))
-        for i, m in enumerate(mets):
-            cols[i].metric(m["label"], str(m["value"]))
-    bd = ss.impact.get("breakdown") or []
-    if bd:
-        st.caption(ss.impact.get("breakdown_label", "Breakdown"))
-        st.bar_chart(pd.DataFrame(bd).set_index("name")["val"])
+# ================= PHASE: APPROVED (artifacts) =================
+elif st.session_state.phase == "approved":
+    ss = st.session_state
+    a = ss.get("artifacts", {}) or {}
+    st.success("Discovery approved. Downstream artifacts unlocked.")
+    st.caption(f"Session {ss.session_id} - confidence {int(ss.get('confidence',0) or 0)}%")
 
-    st.subheader("2. Evidence")
-    for e in ss.evidence:
-        link = f" - [{e['url']}]({e['url']})" if e["url"] else ""
-        st.markdown(f"<div class='evidence'><span class='pill'>{e['source']}</span> "
-                    f"<span class='cite'>{e['citation']}{link}</span></div>", unsafe_allow_html=True)
+    st.subheader("RICE score")
+    if "rice" not in ss:
+        if st.button("Compute RICE"):
+            with st.spinner("Scoring..."):
+                ss.rice = score_rice(ss.topic)
+            _rerun()
+    else:
+        sc = ss.rice
+        st.metric("RICE score", f"{sc['rice']:,.0f}")
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Reach", f"{sc['reach']:,}")
+        r2.metric("Impact", sc['impact'])
+        r3.metric("Confidence", f"{sc['confidence_pct']}%")
+        r4.metric("Effort (pm)", sc['effort_pm'])
+        st.caption(sc['formula'])
 
-    st.subheader("3. Opportunity score")
-    sc = ss.score
-    st.metric("Opportunity", f"{sc['opportunity_score']} / 10")
-    st.progress(min(1.0, sc["opportunity_score"] / 10.0))
-    st.caption(f"impact {sc['impact_score']} | demand {sc['demand_score']} "
-               f"({sc['demand_issue_count']} issues) | effort {sc['effort_score']} "
-               f"({sc['effort_code_files']} files) - {sc['formula']}")
-
-    st.subheader("4. Existing vs proposed interface")
-    st.caption(f"Screen: {ss.get('mock_screen','order page')}  |  proposed: {ss.get('feat_title','')}  |  existing side grounded in real code + data")
-    components.html(ss.mockup, height=560, scrolling=True)
-
-    st.subheader("5. PRD")
+    st.subheader("PRD")
     if "prd" not in ss:
-        st.caption("On-demand: generate an engineering-ready PRD focused on your request.")
         if st.button("Generate PRD"):
-            mstr = ", ".join(f"{m['label']}: {m['value']}" for m in (ss.impact.get('metrics') or []))
-            estr = "; ".join(f"[{e['source']}] {e['citation']}" for e in ss.evidence)
-            ctx = (f"REQUEST: {ss.ask}\n- RELEVANT METRICS ({ss.topic}): {mstr}\n- EVIDENCE: {estr}." + ss.get("clar_ctx", ""))
+            ctx = ("PROBLEM: " + str(a.get("problem_statement", "")) + "\nGOAL: " + str(a.get("business_goal", "")) +
+                   "\nPAIN: " + "; ".join(a.get("pain_points", []) or []) +
+                   "\nSUCCESS: " + "; ".join(a.get("success_metrics", []) or []) +
+                   "\nCONSTRAINTS: " + "; ".join(a.get("constraints", []) or []) +
+                   "\nEVIDENCE: " + evidence_str(ss.get("evidence", [])))
             with st.spinner("Generating grounded PRD..."):
-                ss.prd = q("CALL PM_MEDIATOR.DISCOVERY.GENERATE_PRD(?,?,?)", [ss.session_id, ss.ask, ctx])[0][0]
+                ss.prd = generate_prd(ss.session_id, ss.idea, ctx)
             _rerun()
     else:
-        with st.expander("View generated PRD", expanded=True):
+        with st.expander("View PRD", expanded=True):
             st.markdown(ss.prd)
-
-    st.subheader("6. Engineering tasks")
-    if "prd" not in ss:
-        st.caption("Generate the PRD first, then create tasks.")
-    elif "ntasks" not in ss:
-        if st.button("Generate engineering tasks"):
-            with st.spinner("Creating engineering tasks..."):
-                ss.ntasks = q("CALL PM_MEDIATOR.DISCOVERY.CREATE_TASKS(?,?)", [ss.session_id, ss.prd])[0][0]
-            _rerun()
-    else:
-        tasks = q("SELECT TASK_KEY,AREA,ESTIMATE,TITLE,STATUS FROM PM_MEDIATOR.DISCOVERY.TASK WHERE SESSION_ID=? ORDER BY TASK_KEY", [ss.session_id])
-        st.dataframe(pd.DataFrame([{"key": t[0], "area": t[1], "est": t[2], "title": t[3], "status": t[4]} for t in tasks]))
-        if st.button("Approve & create tasks"):
-            q("UPDATE PM_MEDIATOR.DISCOVERY.TASK SET STATUS='approved' WHERE SESSION_ID=?", [ss.session_id])
-            st.success(f"{ss.ntasks} tasks approved and persisted (session {ss.session_id}).")
+        st.subheader("Engineering tasks")
+        if "ntasks" not in ss:
+            if st.button("Generate tasks"):
+                with st.spinner("Creating tasks..."):
+                    ss.ntasks = create_tasks(ss.session_id, ss.prd)
+                _rerun()
+        else:
+            tasks = q("SELECT TASK_KEY,AREA,ESTIMATE,TITLE FROM PM_MEDIATOR.DISCOVERY.TASK WHERE SESSION_ID=? ORDER BY TASK_KEY", [ss.session_id])
+            import pandas as pd
+            st.dataframe(pd.DataFrame([{"key": t[0], "area": t[1], "est": t[2], "title": t[3]} for t in tasks]))
 
     st.markdown("---")
     if st.button("New discovery"):
