@@ -1,0 +1,32 @@
+# secrets - NEVER commit
+.keys/
+*.p8
+*.pem
+*.key
+
+# python env / caches
+.venv/
+__pycache__/
+*.pyc
+
+# cloned upstream repo (separate project, has its own git)
+repo/
+
+# generated / large data artifacts
+sql_chunks/
+medusa_llms_full.txt
+gh_discussions.json
+gh_issues_returns.json
+gh_recent.json
+gh_returns.json
+
+# scratch logs and test outputs
+*.log
+test_result.txt
+verify.log
+testout.log
+testerr.log
+
+# tooling state
+.snowflake/
+.DS_Store
