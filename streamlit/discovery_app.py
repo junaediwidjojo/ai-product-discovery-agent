@@ -1,15 +1,29 @@
-"""AI Product Discovery Facilitator - Discovery Workbench (Streamlit in Snowflake).
+"""Nomy Explores - AI Product Discovery Facilitator (Streamlit in Snowflake).
 
-A Senior-PM persona that INTERVIEWS a business stakeholder before a PM gets involved.
-It asks one question at a time, grounds questions in enterprise knowledge (similar past
-requests, docs, tickets), tracks per-dimension coverage + an overall Discovery Confidence,
-builds business artifacts incrementally, and only unlocks PRD/mock/tasks after PM approval.
+A Senior-PM persona that interviews a business stakeholder before a PM gets involved,
+so a PM can plan without scheduling multiple discovery meetings. Everything runs
+natively in Snowflake (Cortex AISQL, Cortex Search, semantic views).
+
+Discovery loop (all backed by SQL "agent skills" in PM_MEDIATOR.DISCOVERY):
+  * Product overview + a repo-derived topic taxonomy seed the session (BUILD_OVERVIEW,
+    BUILD_TAXONOMY); selected topics are passed as focus/context, not the request.
+  * Each turn (DISCOVERY_NEXT) is grounded in three sources:
+      - the real code/docs via Cortex Search (RETRIEVE_EVIDENCE, blended to always
+        include code so the current workflow is read from the repo, not asked);
+      - topic-aware live metrics from the commerce database (DATA_SIGNALS);
+      - the running transcript.
+    It scores per-dimension coverage + Discovery Confidence, asks only what the
+    code/data cannot answer, debates genuine contradictions, and flags features that
+    already exist in the codebase (pivoting to "what to improve").
+  * A Discovery Summary -> Product Manager review gate -> post-approval artifacts
+    (RICE with discovery-aligned confidence, existing-vs-proposed mock, PRD, tasks).
+
 Discovery is the product; the PRD is a downstream artifact.
-
-Written for older Streamlit-in-Snowflake (no chat_input/status/rerun).
+Targets Streamlit in Snowflake >= 1.49 (see streamlit/environment.yml).
 """
 import json
 import uuid
+import re
 import html as _html
 import streamlit as st
 import streamlit.components.v1 as components
@@ -39,8 +53,11 @@ st.markdown(
       [data-testid="stMetricValue"], div[role="radiogroup"] *, [data-baseweb="radio"] * { color:#e6edf3 !important; }
       h1,h2,h3,h4 { color:#7cc4e8 !important; }
       .stTextInput input, .stTextArea textarea { color:#e6edf3 !important; background:#161b22 !important; }
-      .stButton>button { background:#29b5e8; color:#04121b !important; border:0; border-radius:8px; font-weight:700; }
-      .stButton>button:hover { background:#5cc9ef; color:#04121b !important; }
+      .stButton>button { background:#12324a; color:#cfe8f7 !important; border:1px solid #29517a; border-radius:20px; font-weight:600; padding:6px 16px; }
+      .stButton>button:hover { background:#1c4a6e; color:#e6edf3 !important; border-color:#29b5e8; }
+      .stButton>button[kind="primary"] { background:#29b5e8; color:#04121b !important; border:1px solid #29b5e8; }
+      .stButton>button[kind="primary"]:hover { background:#5cc9ef; color:#04121b !important; }
+      div[data-testid="stFormSubmitButton"] .stButton>button, div[data-testid="stFormSubmitButton"] button { background:#29b5e8; color:#04121b !important; border:0; border-radius:20px; font-weight:700; }
       .qcard { background:#161b22; border:1px solid #223; border-left:3px solid #29b5e8; border-radius:8px; padding:14px 16px; margin:8px 0; }
       .qtext { font-size:17px; font-weight:700; color:#e6edf3; }
       .why { font-size:12px; color:#93a4b8; margin-top:4px; }
@@ -48,7 +65,20 @@ st.markdown(
       .turn .qa { font-size:12px; color:#93a4b8; }
       .turn .an { color:#e6edf3; }
       .pill { display:inline-block; padding:3px 9px; border-radius:12px; background:#12324a; color:#7cc4e8 !important; font-size:0.75rem; margin:2px 4px 2px 0; }
+      .datacard { background:#0f2233; border:1px solid #1c4a6e; border-radius:8px; padding:10px 12px; margin:6px 0 10px; font-size:13px; color:#cfe8f7; }
+      .datacard .num { color:#29b5e8; font-weight:700; }
+      .about { background:#12233a; border:1px solid #1c4a6e; border-left:3px solid #29b5e8; border-radius:10px; padding:14px 16px; margin:4px 0 20px; line-height:1.55; color:#dbe7f2; font-size:14px; }
+      .about .num { color:#29b5e8; font-weight:700; }
+      .about .lbl { display:inline-block; color:#7cc4e8; font-weight:700; font-size:12px; text-transform:uppercase; letter-spacing:.05em; margin-bottom:6px; }
+      .subhdr { color:#7cc4e8 !important; font-weight:700; font-size:0.9rem; margin:12px 0 4px; border-bottom:1px solid #223; padding-bottom:3px; }
+      .step { color:#93a4b8; font-size:0.85rem; margin:6px 0; }
       .brief b { color:#7cc4e8; }
+      .brief { margin:14px 0 4px; line-height:1.5; }
+      .ricegrid { display:flex; gap:10px; flex-wrap:wrap; margin:10px 0 4px; }
+      .ricecard { flex:1 1 130px; background:#161b22; border:1px solid #223; border-radius:10px; padding:12px; text-align:center; }
+      .rl { font-size:12px; color:#93a4b8; text-transform:uppercase; letter-spacing:.04em; }
+      .rv { font-size:24px; font-weight:800; color:#e6edf3; margin:4px 0 8px; }
+      .rb { display:inline-block; color:#04121b; font-weight:800; font-size:11px; padding:3px 12px; border-radius:12px; letter-spacing:.03em; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -61,6 +91,26 @@ def q(sql, params=None):
 def _j(v):
     return json.loads(v) if isinstance(v, str) else v
 
+def load_taxonomy():
+    ss = st.session_state
+    if "taxonomy" not in ss:
+        try:
+            r = q("SELECT TAXONOMY_JSON FROM PM_MEDIATOR.DISCOVERY.REPO_TAXONOMY ORDER BY BUILT_AT DESC LIMIT 1")
+            ss.taxonomy = json.loads(r[0][0]) if r and r[0][0] else {"categories": []}
+        except Exception:
+            ss.taxonomy = {"categories": []}
+    return ss.taxonomy
+
+def load_overview():
+    ss = st.session_state
+    if "overview" not in ss:
+        try:
+            r = q("SELECT OVERVIEW FROM PM_MEDIATOR.DISCOVERY.PRODUCT_PROFILE ORDER BY BUILT_AT DESC LIMIT 1")
+            ss.overview = r[0][0] if r and r[0][0] else ""
+        except Exception:
+            ss.overview = ""
+    return ss.overview
+
 def detect_topic(ask):
     a = (ask or "").lower()
     if any(k in a for k in ["track", "analytic", "journey", "funnel", "event", "instrument", "conversion", "metric", "dashboard", "report"]):
@@ -70,30 +120,64 @@ def detect_topic(ask):
             return c
     return "order"
 
-def retrieve_evidence(query_text, limit=6):
+def _search(query_text, limit, atype):
     try:
-        data = _j(q("CALL PM_MEDIATOR.DISCOVERY.RETRIEVE_EVIDENCE(?, ?)", [query_text, limit])[0][0])
+        data = _j(q("CALL PM_MEDIATOR.DISCOVERY.RETRIEVE_EVIDENCE(?, ?, ?)", [query_text, limit, atype])[0][0])
     except Exception:
         return []
     out = []
     for r in (data.get("results") or []):
         cite = r.get("TITLE", "")
-        if r.get("LINE_START") is not None:
+        if r.get("LINE_START") is not None and str(r.get("LINE_START")) != "":
             cite = f"{r.get('TITLE')}:{r.get('LINE_START')}-{r.get('LINE_END')}"
-        out.append({"source": (r.get("ARTIFACT_TYPE") or "").upper(), "citation": cite, "url": r.get("URL", "")})
+        out.append({"source": (r.get("ARTIFACT_TYPE") or "").upper(), "citation": cite,
+                    "url": r.get("URL", ""), "content": (r.get("CONTENT") or "")})
     return out
 
+def retrieve_evidence(query_text, limit=6):
+    # always include code files so the agent can read the actual implementation,
+    # then fill with the best general matches (docs / issues / more code)
+    code = _search(query_text, 3, "code_file")
+    general = _search(query_text, limit, "")
+    seen, merged = set(), []
+    for e in code + general:
+        k = (e["source"], e["citation"])
+        if k in seen:
+            continue
+        seen.add(k)
+        merged.append(e)
+        if len(merged) >= 6:
+            break
+    return merged
+
 def evidence_str(ev):
-    return "; ".join(f"[{e['source']}] {e['citation']}" for e in ev)[:1000]
+    parts = []
+    for e in ev:
+        snip = " ".join((e.get("content") or "").split()).strip()
+        snip = (" :: " + snip[:240]) if snip else ""
+        parts.append(f"[{e['source']}] {e['citation']}{snip}")
+    return " | ".join(parts)[:3000]
 
 def transcript_str(idea, turns):
-    s = "Stakeholder's initial idea: " + idea + "\n"
+    ss = st.session_state
+    focus = ss.get("focus") or []
+    s = ""
+    if focus:
+        s += ("Business focus areas (CONTEXT ONLY - the parts of the business this concerns; "
+              "use as background to steer the interview, do NOT treat as the request itself): "
+              + ", ".join(focus) + "\n")
+    s += "Stakeholder's initial idea: " + idea + "\n"
     for t in turns:
         s += "AI: " + t["q"] + "\nStakeholder: " + t["a"] + "\n"
     return s
 
 def discovery_next(transcript, ev, asked):
     return _j(q("CALL PM_MEDIATOR.DISCOVERY.DISCOVERY_NEXT(?,?,?)", [transcript, ev, asked])[0][0]) or {}
+
+def conf_of(nxt):
+    cov = (nxt or {}).get("coverage") or {}
+    avg = round(sum(cov.values()) / len(cov)) if cov else 0
+    return max(int((nxt or {}).get("confidence", 0) or 0), avg)
 
 def discovery_artifacts(transcript, ev):
     return _j(q("CALL PM_MEDIATOR.DISCOVERY.DISCOVERY_ARTIFACTS(?,?)", [transcript, ev])[0][0]) or {}
@@ -116,13 +200,34 @@ def save_artifacts(sid, artifacts):
 
 # ---------- Post-approval artifact helpers (reused) ----------
 def esc(s):
-    return _html.escape(str(s))
+    return _html.escape(str(s), quote=False)
 
-def score_rice(topic):
-    return _j(q("CALL PM_MEDIATOR.DISCOVERY.SCORE_RICE(?)", [topic])[0][0])
+def hl_nums(s):
+    # escape first, then highlight numeric figures ($, counts, %, decimals) as data-derived
+    return re.sub(r"(\$?\d[\d,]*(?:\.\d+)?%?)", r"<span class='num'>\1</span>", esc(s))
+
+def hl_md(s):
+    # highlight numeric figures using Streamlit colored-markdown (for widget labels like st.radio)
+    return re.sub(r"(\$?\d[\d,]*(?:\.\d+)?%?)", r":blue[**\1**]", str(s))
+
+def score_rice(topic, conf=0):
+    return _j(q("CALL PM_MEDIATOR.DISCOVERY.SCORE_RICE(?,?)", [topic, int(conf or 0)])[0][0])
+
+def _band_color(band, invert=False):
+    good = {"Low": "#e5534b", "Med": "#d29922", "High": "#3fb950"}
+    bad = {"Low": "#3fb950", "Med": "#d29922", "High": "#e5534b"}
+    return (bad if invert else good).get(band or "", "#6e7681")
+
+def _rice_dim(label, value, band, invert=False):
+    color = _band_color(band, invert)
+    return ("<div class='ricecard'>"
+            f"<div class='rl'>{esc(label)}</div>"
+            f"<div class='rv'>{esc(value)}</div>"
+            f"<div class='rb' style='background:{color}'>{esc(band or '-')}</div></div>")
 
 def render_rice(sc):
     band = sc.get("band", "")
+    conf = int(round(float(sc.get("confidence_pct", 0) or 0)))
     msg = f"RICE {sc['rice']:,.0f} - {band}. {sc.get('reason','')}"
     if "High" in band:
         st.success(msg)
@@ -130,12 +235,14 @@ def render_rice(sc):
         st.info(msg)
     else:
         st.warning(msg)
-    r1, r2, r3, r4 = st.columns(4)
-    r1.metric("Reach", f"{sc['reach']:,}")
-    r2.metric("Impact", sc['impact'])
-    r3.metric("Confidence", f"{sc['confidence_pct']}%")
-    r4.metric("Effort (pm)", sc['effort_pm'])
-    st.caption(sc['formula'])
+    html = ("<div class='ricegrid'>"
+            + _rice_dim("Reach", f"{int(sc['reach']):,}", sc.get("reach_band"))
+            + _rice_dim("Impact", f"{float(sc['impact']):g}x", sc.get("impact_band"))
+            + _rice_dim("Confidence", f"{conf}%", sc.get("confidence_band"))
+            + _rice_dim("Effort", f"{float(sc['effort_pm']):g} pm", sc.get("effort_band"), invert=True)
+            + "</div>")
+    st.markdown(html, unsafe_allow_html=True)
+    st.caption(sc.get("formula", "") + "  -  colors: green = favorable, amber = medium, red = unfavorable")
 
 def generate_prd(sid, subject, ctx):
     return q("CALL PM_MEDIATOR.DISCOVERY.GENERATE_PRD(?,?,?)", [sid, subject, ctx])[0][0]
@@ -239,20 +346,21 @@ def evidence_panel(ss):
         if det:
             st.markdown("**Detected:** " + "; ".join(det))
 
-def start_discovery(idea):
+def start_discovery(idea, focus=None):
     ss = st.session_state
     ss.idea = idea
-    ss.topic = detect_topic(idea)
+    ss.focus = focus or []
+    ss.topic = detect_topic((idea or "") + " " + " ".join(ss.focus))
     ss.turns = []
     ss.asked = 0
     ss.session_id = str(uuid.uuid4())[:12]
     with st.spinner("Scanning enterprise knowledge for similar initiatives..."):
-        ss.evidence = retrieve_evidence(idea)
+        ss.evidence = retrieve_evidence((idea or "") + " " + " ".join(ss.focus))
     with st.spinner("Preparing the discovery interview..."):
         nxt = discovery_next(transcript_str(idea, ss.turns), evidence_str(ss.evidence), 0)
     ss.next = nxt
     ss.coverage = nxt.get("coverage", {})
-    ss.confidence = nxt.get("confidence", 0)
+    ss.confidence = conf_of(nxt)
     try:
         save_session(ss.session_id, idea, "in_discovery", ss.confidence)
     except Exception as e:
@@ -276,7 +384,7 @@ def process_pending():
     nxt = discovery_next(tr, evidence_str(ss.evidence), ss.asked)
     ss.next = nxt
     ss.coverage = nxt.get("coverage", ss.coverage)
-    ss.confidence = nxt.get("confidence", ss.confidence)
+    ss.confidence = conf_of(nxt)
     try:
         save_session(ss.session_id, ss.idea, "in_discovery", ss.confidence)
     except Exception:
@@ -291,7 +399,7 @@ def build_summary():
     with st.spinner("Synthesizing the discovery brief..."):
         ss.artifacts = discovery_artifacts(tr, evidence_str(ss.evidence))
     try:
-        ss.rice = score_rice(ss.topic)
+        ss.rice = score_rice(ss.topic, ss.get("confidence", 0))
     except Exception:
         ss.rice = None
     try:
@@ -306,12 +414,40 @@ st.title("Nomy Explores")
 st.caption("AI Product Discovery Facilitator - describe a business pain in plain words; I run the discovery interview a Senior PM would, so a PM can plan without scheduling multiple meetings.")
 
 if st.session_state.phase == "idea":
+    ss = st.session_state
+    ov = load_overview()
+    if ov:
+        st.markdown(f"<div class='about'><span class='lbl'>What this product does</span><br/>{hl_nums(ov)}</div>",
+                    unsafe_allow_html=True)
+    tax = load_taxonomy()
+    topics = tax.get("topics") or []
+
+    if topics:
+        st.markdown("#### Focus areas (optional)")
+        st.caption("Pick the parts of the business this concerns. This gives Nomy context to steer the interview - it does not start discovery on its own.")
+        names = [t["name"] for t in topics]
+        descs = {t["name"]: t.get("desc", "") for t in topics}
+        chosen = st.pills("Focus areas", names, selection_mode="multi",
+                          key="topic_pills", label_visibility="collapsed")
+        chosen = chosen or []
+        if chosen:
+            st.caption("Selected focus: " + ", ".join(chosen))
+        st.markdown("---")
+
     with st.form("idea_form"):
-        idea = st.text_input("What business problem or idea is on your mind?",
-                             placeholder="e.g. Customers keep asking for refunds and support is overwhelmed", key="idea_box")
-        go = st.form_submit_button("Start discovery")
-    if go and idea:
-        start_discovery(idea)
+        idea = st.text_input("Describe the business problem or idea to explore",
+                             placeholder="e.g. Customers keep calling support to check where their order is", key="idea_box")
+        go = st.form_submit_button("Start discovery", type="primary", disabled=ss.get("starting", False))
+    if go and idea and not ss.get("starting"):
+        ss.starting = True
+        ss.pending_idea = idea
+        _rerun()
+    if ss.get("starting"):
+        try:
+            with st.spinner("Starting discovery..."):
+                start_discovery(ss.get("pending_idea", ""), st.session_state.get("topic_pills") or [])
+        finally:
+            ss.starting = False
         _rerun()
 
 # ================= PHASE: INTERVIEW =================
@@ -322,13 +458,7 @@ elif st.session_state.phase == "interview":
         coverage_rail(ss)
         evidence_panel(ss)
     with left:
-        st.markdown(f"**Original idea:** {ss.idea}")
-        _wp = (ss.get("next") or {}).get("working_problem")
-        if _wp and _wp.strip() and _wp.strip().lower() != (ss.idea or "").strip().lower():
-            st.markdown(f"<span class='pill'>Working understanding</span> {esc(_wp)}", unsafe_allow_html=True)
-        for t in ss.turns:
-            st.markdown(f"<div class='turn'><div class='qa'>{esc(t['q'])}</div>"
-                        f"<div class='an'>{esc(t['a'])}</div></div>", unsafe_allow_html=True)
+        # --- active question + answer at the TOP so a rerun lands here, not on old history ---
         if ss.get("pending"):
             st.markdown("<div class='qcard'><div class='qtext'>Nomy is reflecting on your answer...</div>"
                         "<div class='why'>Scoring coverage and choosing the most valuable next question.</div></div>",
@@ -338,17 +468,28 @@ elif st.session_state.phase == "interview":
             _rerun()
         else:
             nxt = ss.get("next") or {}
+            if nxt.get("already_exists") and str(nxt.get("existing_note", "")).strip():
+                st.warning("Heads up - this looks already built in the codebase. "
+                           + str(nxt.get("existing_note", ""))
+                           + "  Let's focus on what to improve (or stop here if it already covers the need).")
+                if st.button("This already covers the need - stop discovery", key="halt"):
+                    ss.halt_note = str(nxt.get("existing_note", ""))
+                    ss.phase = "halted"
+                    _rerun()
             adj = nxt.get("adjustment") or {}
-            if adj.get("needed"):
-                st.warning("PM adjustment - " + str(adj.get("note", "")) +
-                           (("  Reframe: " + str(adj.get("reframe", ""))) if adj.get("reframe") else ""))
+            if adj.get("needed") and str(adj.get("note", "")).strip():
+                st.info("Let's make sure we're aligned - " + str(adj.get("note", "")))
             qn = nxt.get("question", "Tell me more about the problem.")
+            _di = nxt.get("data_insight")
+            if _di and str(_di).strip():
+                st.markdown(f"<div class='datacard'><span class='pill'>From your data</span> {hl_nums(_di)}</div>",
+                            unsafe_allow_html=True)
             st.markdown(f"<div class='qcard'><div class='qtext'>{esc(qn)}</div>"
                         f"<div class='why'>{esc(nxt.get('why',''))}</div></div>", unsafe_allow_html=True)
             opts = (nxt.get("options") or [])
             SENTINEL = "Type my own answer"
             with st.form("answer_form", clear_on_submit=True):
-                picked = st.radio("Quick answer (optional):", opts + [SENTINEL], key="pick") if opts else None
+                picked = st.radio("Quick answer (optional):", opts + [SENTINEL], format_func=hl_md, key="pick") if opts else None
                 typed = st.text_input("Your answer", key="ans_box")
                 submitted = st.form_submit_button("Answer")
                 st.caption("- or, when you have shared enough -")
@@ -364,6 +505,34 @@ elif st.session_state.phase == "interview":
                 build_summary()
                 _rerun()
 
+        # --- context + conversation history BELOW the active question (newest first) ---
+        st.markdown("---")
+        st.markdown(f"**Original idea:** {esc(ss.idea)}")
+        if ss.get("focus"):
+            st.markdown("<span class='pill'>Focus</span> " + esc(", ".join(ss.focus)), unsafe_allow_html=True)
+        _wp = (ss.get("next") or {}).get("working_problem")
+        if _wp and _wp.strip() and _wp.strip().lower() != (ss.idea or "").strip().lower():
+            st.markdown(f"<span class='pill'>Working understanding</span> {esc(_wp)}", unsafe_allow_html=True)
+        if ss.turns:
+            st.markdown("##### Conversation so far")
+            for t in reversed(ss.turns):
+                st.markdown(f"<div class='turn'><div class='qa'>{esc(t['q'])}</div>"
+                            f"<div class='an'>{esc(t['a'])}</div></div>", unsafe_allow_html=True)
+
+# ================= PHASE: HALTED (feature already exists) =================
+elif st.session_state.phase == "halted":
+    ss = st.session_state
+    st.subheader("Discovery stopped - feature already exists")
+    if str(ss.get("halt_note", "")).strip():
+        st.warning(ss.get("halt_note", ""))
+    st.markdown("**Recommendation:** this capability already exists in the codebase, so a new build isn't warranted. "
+                "Open a focused improvement ticket for the specific gap (discoverability, UX, rules, performance) instead of a greenfield project.")
+    st.caption(f"Original idea: {ss.get('idea','')}")
+    if st.button("Start a new discovery"):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        _rerun()
+
 # ================= PHASE: SUMMARY =================
 elif st.session_state.phase == "summary":
     ss = st.session_state
@@ -375,11 +544,11 @@ elif st.session_state.phase == "summary":
         if not val:
             return
         if isinstance(val, list):
-            st.markdown(f"<div class='brief'><b>{title}</b></div>", unsafe_allow_html=True)
-            for x in val:
-                st.markdown(f"- {x}")
+            items = "\n".join(f"- {x}" for x in val)
+            st.markdown(f"<div class='brief'><b>{esc(title)}</b></div>", unsafe_allow_html=True)
+            st.markdown(items)
         else:
-            st.markdown(f"<div class='brief'><b>{title}</b><br/>{esc(val)}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='brief'><b>{esc(title)}</b><br/>{esc(val)}</div>", unsafe_allow_html=True)
 
     block("Business Problem", a.get("problem_statement"))
     block("Business Goal", a.get("business_goal"))
@@ -443,7 +612,7 @@ elif st.session_state.phase == "approved":
     if not ss.get("rice"):
         if st.button("Compute RICE"):
             with st.spinner("Scoring..."):
-                ss.rice = score_rice(ss.topic)
+                ss.rice = score_rice(ss.topic, ss.get("confidence", 0))
             _rerun()
     else:
         render_rice(ss.rice)

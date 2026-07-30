@@ -4,6 +4,7 @@ import snowflake.connector
 
 KEY = "/Users/junaediwidjojo/.snowflake/cortex/playground/workspace/.keys/rsa_key.p8"
 APP = "/Users/junaediwidjojo/.snowflake/cortex/playground/workspace/streamlit/discovery_app.py"
+ENV = "/Users/junaediwidjojo/.snowflake/cortex/playground/workspace/streamlit/environment.yml"
 
 con = snowflake.connector.connect(
     account="HEJFBGN-KN37537", user="junaediwidjojo", role="ACCOUNTADMIN",
@@ -11,9 +12,10 @@ con = snowflake.connector.connect(
 cur = con.cursor()
 cur.execute("CREATE STAGE IF NOT EXISTS PM_MEDIATOR.DISCOVERY.APP_STAGE "
             "ENCRYPTION = (TYPE='SNOWFLAKE_SSE') DIRECTORY = (ENABLE=TRUE)")
-cur.execute(f"PUT 'file://{APP}' @PM_MEDIATOR.DISCOVERY.APP_STAGE OVERWRITE=TRUE AUTO_COMPRESS=FALSE")
-for r in cur.fetchall():
-    print("PUT:", r[0], r[6] if len(r) > 6 else "")
+for f in (APP, ENV):
+    cur.execute(f"PUT 'file://{f}' @PM_MEDIATOR.DISCOVERY.APP_STAGE OVERWRITE=TRUE AUTO_COMPRESS=FALSE")
+    for r in cur.fetchall():
+        print("PUT:", r[0], r[6] if len(r) > 6 else "")
 cur.execute("""CREATE OR REPLACE STREAMLIT PM_MEDIATOR.DISCOVERY.DISCOVERY_WORKBENCH
   ROOT_LOCATION = '@PM_MEDIATOR.DISCOVERY.APP_STAGE'
   MAIN_FILE = 'discovery_app.py'
