@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Parse Postgres pg_dump (COPY format) -> emit chunked Snowflake SQL files."""
+import os
 import re, os
 
-DUMP = "/Users/junaediwidjojo/HobbyProjects/nomy-explores/medusa_dev_export_20260724.sql"
-OUT  = "/Users/junaediwidjojo/.snowflake/cortex/playground/workspace/sql_chunks"
+DUMP = os.environ.get("MEDUSA_DUMP", os.path.join(os.path.dirname(os.path.abspath(__file__)), "medusa_dev_export.sql"))
+OUT  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sql_chunks")
 ROWS_PER_INSERT = 500
 CHUNK_BYTES = 500_000
 RESERVED_RENAME = {"ORDER": "ORDERS"}

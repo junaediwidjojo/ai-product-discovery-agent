@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Parse a Postgres pg_dump (COPY format) and load it into Snowflake PM_MEDIATOR.MOCK."""
+import os
 import re, sys, snowflake.connector
 
-DUMP = "/Users/junaediwidjojo/HobbyProjects/nomy-explores/medusa_dev_export_20260724.sql"
+DUMP = os.environ.get("MEDUSA_DUMP", os.path.join(os.path.dirname(os.path.abspath(__file__)), "medusa_dev_export.sql"))
 CONN = "hejfbgn-kn37537"
 DB, SCHEMA, WH = "PM_MEDIATOR", "MOCK", "PM_MEDIATOR_WH"
 
@@ -59,8 +60,8 @@ def main():
     print(f"parsed {len(schemas)} table definitions")
 
     con = snowflake.connector.connect(
-        account="HEJFBGN-KN37537", user="junaediwidjojo", role="ACCOUNTADMIN",
-        private_key_file="/Users/junaediwidjojo/.snowflake/cortex/playground/workspace/.keys/rsa_key.p8")
+        account=os.environ["SNOWFLAKE_ACCOUNT"], user=os.environ["SNOWFLAKE_USER"], role=os.environ.get("SNOWFLAKE_ROLE", "ACCOUNTADMIN"),
+        private_key_file=os.environ.get("SNOWFLAKE_PRIVATE_KEY_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".keys", "rsa_key.p8")))
     cur = con.cursor()
     cur.execute(f"CREATE WAREHOUSE IF NOT EXISTS {WH} WAREHOUSE_SIZE=XSMALL "
                 "AUTO_SUSPEND=60 AUTO_RESUME=TRUE INITIALLY_SUSPENDED=TRUE")

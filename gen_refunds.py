@@ -4,7 +4,7 @@ import os, random, string, datetime as dt
 import snowflake.connector
 
 random.seed(42)
-KEY = "/Users/junaediwidjojo/.snowflake/cortex/playground/workspace/.keys/rsa_key.p8"
+KEY = os.environ.get("SNOWFLAKE_PRIVATE_KEY_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".keys", "rsa_key.p8"))
 RETURN_RATE = 0.12
 
 def uid(prefix):
@@ -49,7 +49,7 @@ def weighted(pairs):
 
 def main():
     con = snowflake.connector.connect(
-        account="HEJFBGN-KN37537", user="junaediwidjojo", role="ACCOUNTADMIN",
+        account=os.environ["SNOWFLAKE_ACCOUNT"], user=os.environ["SNOWFLAKE_USER"], role=os.environ.get("SNOWFLAKE_ROLE", "ACCOUNTADMIN"),
         private_key_file=KEY, warehouse="PM_MEDIATOR_WH", database="PM_MEDIATOR", schema="MOCK")
     cur = con.cursor()
     for name, ddl in DDL.items():

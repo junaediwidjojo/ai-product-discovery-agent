@@ -2,8 +2,8 @@
 """Index the cloned repo's source files into PM_MEDIATOR.MOCK.CODE_FILES (chunked) for Cortex Search."""
 import os, snowflake.connector
 
-KEY = "/Users/junaediwidjojo/.snowflake/cortex/playground/workspace/.keys/rsa_key.p8"
-REPO = "/Users/junaediwidjojo/.snowflake/cortex/playground/workspace/repo"
+KEY = os.environ.get("SNOWFLAKE_PRIVATE_KEY_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".keys", "rsa_key.p8"))
+REPO = os.environ.get("MEDUSA_REPO", os.path.join(os.path.dirname(os.path.abspath(__file__)), "repo"))
 INCLUDE = (".ts", ".tsx", ".js", ".jsx", ".md", ".mdx", ".json", ".yml", ".yaml", ".css")
 EXCLUDE_DIRS = {"node_modules", ".git", ".next", "dist", "build", ".turbo", "coverage", "public"}
 EXCLUDE_FILES = {"pnpm-lock.yaml", "package-lock.json", "yarn.lock", "tsconfig.tsbuildinfo", "next-env.d.ts"}
@@ -41,7 +41,7 @@ def main():
                     rows.append((rel, LANG[ext], s, e, content))
 
     con = snowflake.connector.connect(
-        account="HEJFBGN-KN37537", user="junaediwidjojo", role="ACCOUNTADMIN",
+        account=os.environ["SNOWFLAKE_ACCOUNT"], user=os.environ["SNOWFLAKE_USER"], role=os.environ.get("SNOWFLAKE_ROLE", "ACCOUNTADMIN"),
         private_key_file=KEY, warehouse="PM_MEDIATOR_WH", database="PM_MEDIATOR", schema="MOCK")
     cur = con.cursor()
     cur.execute("""CREATE OR REPLACE TABLE "CODE_FILES" (

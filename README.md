@@ -58,14 +58,24 @@ Runtime: Streamlit in Snowflake **1.49.1** on a warehouse runtime (pinned in `st
 
 ## Reproduce
 
+Scripts read credentials from environment variables (nothing machine- or user-specific is committed); key-pair auth is used for headless runs:
+
 ```bash
-python load_medusa.py; python gen_refunds.py                          # commerce data + synthesized returns/refunds
-python index_code.py; python index_docs.py; python index_community.py # knowledge graph (code, docs, issues)
-# apply the Discovery backend (skills, tables, agent):
-#   snowsql / Snowsight: run sql/discovery_schema.sql
-python deploy_app.py                                                  # PUT app + environment.yml, CREATE STREAMLIT
-python verify_discovery.py                                            # non-destructive skill check
+export SNOWFLAKE_ACCOUNT=<org-account>
+export SNOWFLAKE_USER=<user>
+export SNOWFLAKE_PRIVATE_KEY_FILE=./.keys/rsa_key.p8   # optional; defaults next to the scripts
+# optional: MEDUSA_DUMP / MEDUSA_REPO / MEDUSA_DOCS to point at source inputs
+
+python load_medusa.py                                 # load Medusa commerce tables
+python gen_refunds.py                                 # seed the returns/refunds study case: synthetic
+                                                      # return+refund events on 12% of the REAL orders
+python index_code.py; python index_docs.py; python index_community.py  # build the knowledge graph (code, docs, issues)
+# apply the Discovery backend (skills, tables, agent): run sql/discovery_schema.sql in Snowsight/snowsql
+python deploy_app.py                                  # PUT app + environment.yml, CREATE STREAMLIT
+python verify_discovery.py                            # non-destructive skill check
 ```
+
+`gen_refunds.py` exists because the Medusa dev export ships the return/refund *tables* empty; it populates them with realistic, weighted events grounded in the real orders so the returns/refunds data-grounding (and the RICE returns case) has believable numbers.
 
 ## Disclosures
 

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Local, non-destructive test of the Discovery Workbench backend pipeline for 'I want refunds'.
 Mirrors the app's session.sql calls. Reads + idempotent CALLs to DISCOVERY output tables only."""
+import os
 import json, snowflake.connector
 
-KEY = "/Users/junaediwidjojo/.snowflake/cortex/playground/workspace/.keys/rsa_key.p8"
+KEY = os.environ.get("SNOWFLAKE_PRIVATE_KEY_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".keys", "rsa_key.p8"))
 MODEL = "mistral-large2"
 SID = "local-test"
 
 con = snowflake.connector.connect(
-    account="HEJFBGN-KN37537", user="junaediwidjojo", role="ACCOUNTADMIN",
+    account=os.environ["SNOWFLAKE_ACCOUNT"], user=os.environ["SNOWFLAKE_USER"], role=os.environ.get("SNOWFLAKE_ROLE", "ACCOUNTADMIN"),
     private_key_file=KEY, warehouse="PM_MEDIATOR_WH", database="PM_MEDIATOR", schema="DISCOVERY")
 cur = con.cursor()
 

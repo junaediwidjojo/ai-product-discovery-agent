@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Chunk Medusa llms-full.txt by doc page and load into PM_MEDIATOR.MOCK.MEDUSA_DOCS for Cortex Search."""
+import os
 import re, snowflake.connector
 
-KEY = "/Users/junaediwidjojo/.snowflake/cortex/playground/workspace/.keys/rsa_key.p8"
-SRC = "/Users/junaediwidjojo/.snowflake/cortex/playground/workspace/medusa_llms_full.txt"
+KEY = os.environ.get("SNOWFLAKE_PRIVATE_KEY_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".keys", "rsa_key.p8"))
+SRC = os.environ.get("MEDUSA_DOCS", os.path.join(os.path.dirname(os.path.abspath(__file__)), "medusa_llms_full.txt"))
 CHUNK, OVERLAP = 1600, 200
 
 def main():
@@ -30,7 +31,7 @@ def main():
             i += CHUNK - OVERLAP
 
     con = snowflake.connector.connect(
-        account="HEJFBGN-KN37537", user="junaediwidjojo", role="ACCOUNTADMIN",
+        account=os.environ["SNOWFLAKE_ACCOUNT"], user=os.environ["SNOWFLAKE_USER"], role=os.environ.get("SNOWFLAKE_ROLE", "ACCOUNTADMIN"),
         private_key_file=KEY, warehouse="PM_MEDIATOR_WH", database="PM_MEDIATOR", schema="MOCK")
     cur = con.cursor()
     cur.execute("""CREATE OR REPLACE TABLE "MEDUSA_DOCS" (
