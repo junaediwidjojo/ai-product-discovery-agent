@@ -1,59 +1,124 @@
-# AI Product Discovery Agent - Submission
+# Nomy Explores — Submission
 
-**Hackathon:** Snowflake CoCo CLI Hackathon
-**Category:** AI-Native Data Application
+**Hackathon:** Snowflake CoCo CLI Hackathon · **Category:** AI-Native Data Application
+**App:** `PM_MEDIATOR.DISCOVERY.DISCOVERY_WORKBENCH` (Streamlit in Snowflake) · **Repo:** this repository
 
-## One-liner
-An AI Product Discovery Facilitator: a Senior-PM persona that interviews a business stakeholder
-(grounded in enterprise knowledge), tracks per-dimension coverage + Discovery Confidence, and
-produces a PM-ready business brief - so a PM can plan without multiple discovery meetings.
-Downstream artifacts (RICE, mock, PRD, tasks) unlock only after PM approval. Discovery is the
-product; the PRD is an artifact. Not a chatbot, not basic RAG.
+---
 
-## Architecture (all Snowflake-native)
-- **Operational plane** `PM_MEDIATOR.MOCK` - 68 commerce tables + synthesized refund domain; `COMMERCE_SV` semantic view.
-- **Knowledge plane** `PM_MEDIATOR.KNOWLEDGE` - normalized supertype/subtype + graph model (code, docs, community, DB schema); unified `KNOWLEDGE_SEARCH` Cortex Search; native Git repository object; weekly refresh Task.
-- **Skills + actions** `PM_MEDIATOR.DISCOVERY` - 7 reusable stored-procedure Agent Skills, output tables (session/evidence/impact/recommendation/prd/task), `@ARTIFACTS` stage.
-- **Reasoning engine** - native Cortex Agent `PRODUCT_DISCOVERY_AGENT` (tools: Cortex Analyst, Cortex Search, score_opportunity).
-- **App** - Streamlit-in-Snowflake `DISCOVERY_WORKBENCH` (thin orchestrator over the skills; conversation-grows UI; human-in-the-loop clarify; lazy PRD/tasks for fast response).
-- **Guardrail** - Resource Monitor `PM_MEDIATOR_GUARD` (20-credit hard cap).
+## 1. Problem Brief
 
-## Agent Skills (reusable, orchestrated - see SKILLS.md)
-QUANTIFY_IMPACT, RETRIEVE_EVIDENCE, CLARIFY_NEED (agentic gather-more-needs), PROPOSE_FEATURE,
-SCORE_OPPORTUNITY, GENERATE_PRD, CREATE_TASKS. The app/agent sequence these; no single giant prompt.
+**Real business problem.** Product discovery is a bottleneck. Business stakeholders raise requests as vague pains or half-baked specs ("add a voucher field", "build a contact page"). Product Managers then burn multiple meetings extracting the *real* problem, and decisions are often made without checking two things the company already has: **the codebase** (is this already built?) and **the data** (is this actually a problem, and how big?). The result is duplicated work, features nobody needed, and slow throughput.
 
-## Verification / evaluation (self-run, non-destructive)
-- **End-to-end skill orchestration:** all 7 skills PASSED for topic "refund" - impact 12.0%, 6 cited
-  evidence items, clarify question generated, feature proposed, Opportunity Score 9.4/10, PRD ~1.8K chars, 7 tasks.
-- **Cortex Analyst accuracy: 3/3 (100%)** on an eval set - order/return counts + total refund, refunds
-  by reason, and average refund all matched hand-written ground truth (1,200 orders, 144 returns, avg $158.54).
-- Each skill also unit-verified via `CALL`.
+**Target user / persona.**
+- **Primary — Business stakeholder** (ops, marketing, support lead) who requests features but isn't a PM and doesn't know the implementation.
+- **Secondary — Product Manager**, who receives a discovery-ready brief instead of a raw request and can plan immediately.
+- **Beneficiary — Engineering**, who gets a grounded PRD and prioritized tickets instead of ambiguous asks.
 
-## How it maps to judging criteria
-- **Real-world relevance:** business<->engineering translation, grounded in real data + code with citations.
-- **Technical execution:** Cortex Search + Cortex Analyst + Semantic View + AISQL + native Agent + SiS +
-  stored-proc skill orchestration + normalized knowledge graph + Git integration + Tasks + Resource Monitor.
-- **Completeness:** question -> insight -> recommendation -> ACTION (tasks persisted; Approve flips status).
-- **AI reasoning:** transparent Opportunity Score (impact x demand / effort) + human-in-the-loop clarify, not a black box.
+**Current pain → improvement.** Today: several discovery meetings per idea, requests taken at face value, no data grounding, accidental rebuilds. With Nomy: an AI **Senior-PM facilitator** interviews the stakeholder up front, grounds every question in the **real code + live data + conversation**, flags features that already exist, debates contradictions, quantifies the opportunity (RICE), and outputs a PRD + Jira-ready tickets — so the PM starts planning without scheduling those meetings.
+
+**Industry / domain.** Demonstrated on **e-commerce** (Medusa storefront + commerce data), but the pattern is domain-agnostic: any organization with code and data already in Snowflake can point Nomy at it.
+
+---
+
+## 2. Architecture Diagram
+
+All components run natively in Snowflake (Cortex AISQL, Cortex Search, semantic views); the UI is Streamlit-in-Snowflake. Modular **skills** are SQL stored procedures/functions the app composes per step.
+
+```mermaid
+flowchart TB
+  subgraph UI["Streamlit in Snowflake — DISCOVERY_WORKBENCH"]
+    A["Stakeholder: pain/idea + focus chips"]
+    O["Outputs: brief - RICE - PRD - Jira tickets"]
+  end
+
+  subgraph SRC["Data sources"]
+    S1["Structured: Medusa commerce tables<br/>orders, customers, products, returns"]
+    S2["Unstructured: repo code, Medusa docs, GitHub issues"]
+  end
+
+  subgraph KP["KNOWLEDGE plane"]
+    KG["Normalized knowledge graph"]
+    CS["KNOWLEDGE_SEARCH (Cortex Search, auto-embedded)"]
+    SV["COMMERCE_SV (semantic view / Cortex Analyst)"]
+  end
+
+  subgraph SK["DISCOVERY skills (modular, composable)"]
+    BO["BUILD_OVERVIEW"]:::seed
+    BT["BUILD_TAXONOMY"]:::seed
+    RE["RETRIEVE_EVIDENCE<br/>(code-blended)"]
+    DS["DATA_SIGNALS<br/>(topic-aware metrics)"]
+    DN["DISCOVERY_NEXT<br/>(reasoning + orchestration)"]
+    DA["DISCOVERY_ARTIFACTS"]
+    SR["SCORE_RICE"]
+    PRD["GENERATE_PRD"]
+    CT["CREATE_TASKS"]
+  end
+
+  S1 --> KG --> CS
+  S2 --> KG
+  S1 --> SV
+  A --> BO & BT --> A
+  A --> DN
+  RE -->|code + docs| DN
+  DS -->|live numbers| DN
+  CS --> RE
+  SV --> DS
+  DN -->|coverage, confidence, question,<br/>data insight, already-exists| A
+  DN --> DA --> SR --> PRD --> CT --> O
+  CT -.->|demo| JIRA["Jira REST API (extension)"]
+  classDef seed fill:#12324a,stroke:#29b5e8,color:#cfe8f7;
+```
+
+**Data flow — how the pieces plug together:**
+1. **Ingest →** commerce data + code/docs/issues load into Snowflake; the knowledge graph feeds `KNOWLEDGE_SEARCH` (unstructured) and `COMMERCE_SV` (structured).
+2. **Seed →** `BUILD_OVERVIEW` and `BUILD_TAXONOMY` analyze the repo once (cached) to produce the product overview and focus topics.
+3. **Reason (per turn) →** `DISCOVERY_NEXT` orchestrates: it calls `RETRIEVE_EVIDENCE` (code-blended Cortex Search) and `DATA_SIGNALS` (topic-routed live metrics), combines them with the transcript, and returns coverage, confidence, the next question, a data insight, and an "already-exists" flag.
+4. **Synthesize →** `DISCOVERY_ARTIFACTS` produces the business brief; PM approval gates the rest.
+5. **Act →** `SCORE_RICE` (discovery-aligned), `GENERATE_PRD` (13-section, data-grounded), `CREATE_TASKS` (Jira-ready tickets).
+
+**Cortex Code CLI skills / capabilities used** (each independently callable, also exposed via the native `PRODUCT_DISCOVERY_AGENT`):
+
+| Skill | Type | Role in the flow |
+|-------|------|------------------|
+| `BUILD_OVERVIEW` | proc | Repo → neutral "what this product is" overview (cached) |
+| `BUILD_TAXONOMY` | proc | Repo → 10 business focus areas (start-screen chips) |
+| `RETRIEVE_EVIDENCE` | proc | Cortex Search over code/docs/issues; returns content, blended to always include code |
+| `DATA_SIGNALS` | function | Topic-aware live commerce metrics; flags data gaps honestly |
+| `DISCOVERY_NEXT` | proc | Orchestrator: coverage + confidence + next question, grounded in code + data + transcript |
+| `DISCOVERY_ARTIFACTS` | proc | PM-ready business brief |
+| `SCORE_RICE` | proc | RICE with discovery-aligned confidence + Low/Med/High bands |
+| `GENERATE_PRD` | proc | Full 13-section, data-grounded PRD |
+| `CREATE_TASKS` | proc | Jira-ready tickets (type, area, priority, story points) |
+
+**Data sources:** *structured* — Medusa commerce tables (orders, customers, products, returns/refunds) + `COMMERCE_SV`; *unstructured* — repository code, Medusa documentation, GitHub issues, unified in `KNOWLEDGE_SEARCH`.
+
+Full backend DDL is versioned in [`sql/discovery_schema.sql`](sql/discovery_schema.sql).
+
+---
+
+## 3. Impact Statement
+
+**Measurable outcomes**
+- **Discovery cycle time:** collapses the typical **3–5 stakeholder/PM meetings** per idea into a single self-serve session (minutes), producing a PM-ready brief + PRD + tickets.
+- **Fewer wrong/duplicate builds:** every request is checked against the **actual codebase**; already-built features (e.g., the existing checkout promotion-code input) are flagged and hard-stopped before any spec is written.
+- **Decisions grounded in real data:** questions and prioritization cite live numbers (e.g., **1,200 orders, 527 not-completed (44%), 101 in `requires_action`, 144 returns**) instead of opinions; when data is missing (no cart/abandonment tables) it is flagged as a gap rather than guessed.
+- **Consistency:** every idea yields the same structured artifacts (8-dimension coverage, RICE with bands, 13-section PRD, estimated tickets), reducing brief-quality variance across PMs.
+
+**Scalability potential**
+- Runs entirely on Snowflake compute (warehouse runtime, auto-suspend); scales with the account, no external infra.
+- Point it at **any repo + any data** in Snowflake — re-run `BUILD_TAXONOMY` / `BUILD_OVERVIEW` and the focus areas and grounding adapt automatically (multi-repo/topic ready).
+- Cortex Search + semantic views handle growing corpora; skills are stateless and composable.
+
+**Beyond the demo**
+- **Real integrations:** swap the demo Jira cards for the **Jira REST API**; connect a live **Git repository** object with continuous doc/issue sync.
+- **Free NL data Q&A:** surface `COMMERCE_SV` via **Cortex Analyst** so stakeholders can also ask ad-hoc data questions mid-discovery.
+- **Governance & memory:** persist discoveries, dedupe against past sessions, and feed approved PRDs into delivery tooling — turning one-off discovery into an organizational knowledge loop.
+
+---
 
 ## Honest disclosures
-- **Synthetic refund data:** the 1,200 orders/products/customers/prices are a real Medusa seed; the
-  refund/return/claim EVENTS were synthesized on top of those real orders (~12% return rate, real reason
-  labels, amounts derived from real line items). All other commerce data is authentic.
-- **Action target is a mock `TASK` table** (stands in for Jira). Real Jira/Linear is a documented
-  extension: add a notification/API integration and push approved tasks - no schema change needed.
-- **Extensibility:** GitLab MRs, Jira, APIs (OpenAPI), and support tickets map cleanly into the KNOWLEDGE
-  model as new `artifact_type`s + subtype tables + a connector; the model is normalized for exactly this.
+- Real Medusa seed (orders/products/customers/prices); **return & refund events are synthesized** on the real orders (~12% return rate, real reason labels). This dev export does not include cart/checkout-session/promotion tables — the app surfaces that as a data gap rather than fabricating cart-abandonment numbers.
+- The Jira integration is a **clearly labeled demo** (tickets are generated and shown as they would appear on the board); production would push via the Jira REST API.
 
 ## Built with CoCo CLI
-The entire system was designed and built through Cortex Code (CoCo): schema + data loading, the semantic
-view, all three Cortex Search services + the unified one, the DISCOVERY skills, the native Cortex Agent,
-and the Streamlit app were created and self-verified via CoCo, using its built-in skills
-(`semantic-view`, `search-optimization`, `cortex-agent`). A custom `product-discovery` CoCo skill
-(plugin) encodes and orchestrates the workflow. Reproducible scripts live in the workspace
-(`load_medusa.py`, `index_*.py`, `deploy_app.py`, `verify_skills.py`).
-
-## How to run
-Snowsight -> Projects -> Streamlit -> `DISCOVERY_WORKBENCH` (role ACCOUNTADMIN). Type `I want refunds`
-or `improve the product page`. Impact + evidence + score + mock appear fast; PRD and tasks generate
-on demand; Approve persists tasks with provenance.
+Designed, built, and self-verified through Cortex Code (CoCo) — schema, data loading, the semantic view, the `KNOWLEDGE_SEARCH` service, all DISCOVERY skills, the native Cortex Agent, and the Streamlit app — using its skills (`semantic-view`, `search-optimization`, `cortex-agent`). A custom `product-discovery` CoCo skill encodes the workflow. Reproducible scripts: `load_medusa.py`, `gen_refunds.py`, `index_*.py`, `deploy_app.py`, plus `sql/discovery_schema.sql`.
