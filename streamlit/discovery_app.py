@@ -652,20 +652,31 @@ elif st.session_state.phase == "approved":
         components.html(ss.mockup, height=460, scrolling=True)
 
     st.subheader("PRD")
+
+    def prd_ctx():
+        return ("PROBLEM: " + str(a.get("problem_statement", "")) + "\nGOAL: " + str(a.get("business_goal", "")) +
+                "\nPAIN: " + "; ".join(a.get("pain_points", []) or []) +
+                "\nSUCCESS: " + "; ".join(a.get("success_metrics", []) or []) +
+                "\nCONSTRAINTS: " + "; ".join(a.get("constraints", []) or []) +
+                "\nEVIDENCE: " + evidence_str(ss.get("evidence", [])))
+
     if "prd" not in ss:
         if st.button("Generate PRD"):
-            ctx = ("PROBLEM: " + str(a.get("problem_statement", "")) + "\nGOAL: " + str(a.get("business_goal", "")) +
-                   "\nPAIN: " + "; ".join(a.get("pain_points", []) or []) +
-                   "\nSUCCESS: " + "; ".join(a.get("success_metrics", []) or []) +
-                   "\nCONSTRAINTS: " + "; ".join(a.get("constraints", []) or []) +
-                   "\nEVIDENCE: " + evidence_str(ss.get("evidence", [])))
             with st.spinner("Generating grounded PRD..."):
-                ss.prd = generate_prd(ss.session_id, ss.idea, ctx)
+                ss.prd = generate_prd(ss.session_id, ss.idea, prd_ctx())
             _rerun()
     else:
         with st.expander("View PRD", expanded=True):
             st.markdown(ss.prd)
-        st.download_button("Download PRD (.md)", ss.prd or "", file_name="PRD.md", mime="text/markdown")
+        pc1, pc2 = st.columns(2)
+        pc1.download_button("Download PRD (.md)", ss.prd or "", file_name="PRD.md", mime="text/markdown")
+        if pc2.button("Regenerate PRD"):
+            with st.spinner("Regenerating PRD..."):
+                ss.prd = generate_prd(ss.session_id, ss.idea, prd_ctx())
+            for k in ("ntasks", "jira_pushed"):
+                if k in ss:
+                    del ss[k]
+            _rerun()
         st.subheader("Engineering tickets -> Jira")
         st.caption("Demo integration: in production these tickets are pushed to Jira via its REST API. "
                    "Here they are generated from the PRD and shown as they would appear on the board.")
@@ -677,12 +688,19 @@ elif st.session_state.phase == "approved":
         else:
             tasks = q("SELECT TASK_KEY,TYPE,AREA,PRIORITY,ESTIMATE,TITLE,DESCRIPTION,STATUS "
                       "FROM PM_MEDIATOR.DISCOVERY.TASK WHERE SESSION_ID=? ORDER BY TASK_KEY", [ss.session_id])
+            tc1, tc2 = st.columns(2)
             if not ss.get("jira_pushed"):
-                if st.button(f"Create {len(tasks)} tickets in Jira (demo)", type="primary"):
+                if tc1.button(f"Create {len(tasks)} tickets in Jira (demo)", type="primary"):
                     ss.jira_pushed = True
                     _rerun()
             else:
-                st.success(f"Created {len(tasks)} tickets on Jira board NOMY (demo).")
+                tc1.success(f"Created {len(tasks)} tickets on board NOMY (demo).")
+            if tc2.button("Regenerate tickets"):
+                with st.spinner("Regenerating tickets..."):
+                    ss.ntasks = create_tasks(ss.session_id, ss.prd)
+                if "jira_pushed" in ss:
+                    del ss["jira_pushed"]
+                _rerun()
             for t in tasks:
                 st.markdown(render_jira(t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]),
                             unsafe_allow_html=True)
