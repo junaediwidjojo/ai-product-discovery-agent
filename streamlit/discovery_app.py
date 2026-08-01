@@ -70,6 +70,14 @@ st.markdown(
       .about { background:#12233a; border:1px solid #1c4a6e; border-left:3px solid #29b5e8; border-radius:10px; padding:14px 16px; margin:4px 0 20px; line-height:1.55; color:#dbe7f2; font-size:14px; }
       .about .num { color:#29b5e8; font-weight:700; }
       .about .lbl { display:inline-block; color:#7cc4e8; font-weight:700; font-size:12px; text-transform:uppercase; letter-spacing:.05em; margin-bottom:6px; }
+      .jira { background:#0f1620; border:1px solid #223; border-left:3px solid #29b5e8; border-radius:8px; padding:10px 12px; margin:8px 0; }
+      .jira-h { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:4px; }
+      .jk { font-family:monospace; color:#7cc4e8; font-weight:700; font-size:12px; }
+      .jira-h .jt, .jira-h .jp, .jira-h .jst, .jira-h .jsp { font-size:11px; padding:1px 8px; border-radius:10px; font-weight:700; }
+      .jt-story{background:#1f5c3d;color:#c8f0d8}.jt-task{background:#1c4a6e;color:#cfe8f7}.jt-bug{background:#6e1c1c;color:#f7cfcf}.jt-spike{background:#4a1c6e;color:#e6cff7}
+      .jp-high{background:#e5534b;color:#1a0000}.jp-med{background:#d29922;color:#1a1400}.jp-low{background:#3fb950;color:#04140a}
+      .jsp{background:#12324a;color:#cfe8f7}.jst{background:#21262d;color:#93a4b8}
+      .jtitle{color:#e6edf3;font-weight:700;font-size:14px}.jdesc{color:#93a4b8;font-size:12px;margin-top:2px}.jarea{color:#6e7681;font-size:11px;margin-top:4px;text-transform:uppercase;letter-spacing:.04em}
       .subhdr { color:#7cc4e8 !important; font-weight:700; font-size:0.9rem; margin:12px 0 4px; border-bottom:1px solid #223; padding-bottom:3px; }
       .step { color:#93a4b8; font-size:0.85rem; margin:6px 0; }
       .brief b { color:#7cc4e8; }
@@ -249,6 +257,20 @@ def generate_prd(sid, subject, ctx):
 
 def create_tasks(sid, prd):
     return q("CALL PM_MEDIATOR.DISCOVERY.CREATE_TASKS(?,?)", [sid, prd])[0][0]
+
+def render_jira(key, typ, area, prio, est, title, desc, status):
+    tcls = {"Story": "jt-story", "Task": "jt-task", "Bug": "jt-bug", "Spike": "jt-spike"}.get((typ or "").title(), "jt-task")
+    pcls = {"High": "jp-high", "Medium": "jp-med", "Low": "jp-low"}.get((prio or "").title(), "jp-med")
+    pts = f"{est} pts" if str(est).strip().isdigit() else esc(est or "")
+    return ("<div class='jira'>"
+            f"<div class='jira-h'><span class='jk'>{esc(key)}</span>"
+            f"<span class='jt {tcls}'>{esc(typ or 'Task')}</span>"
+            f"<span class='jp {pcls}'>{esc(prio or 'Medium')}</span>"
+            f"<span class='jsp'>{esc(pts)}</span>"
+            f"<span class='jst'>{esc(status or 'To Do')}</span></div>"
+            f"<div class='jtitle'>{esc(title)}</div>"
+            f"<div class='jdesc'>{esc(desc)}</div>"
+            f"<div class='jarea'>{esc(area or '')}</div></div>")
 
 FEATURES = {
     "refund": ("Self-Serve Returns", "Start a return in 2 taps: pick items, choose a reason, instant refund.", "Start a return"),
@@ -643,16 +665,27 @@ elif st.session_state.phase == "approved":
     else:
         with st.expander("View PRD", expanded=True):
             st.markdown(ss.prd)
-        st.subheader("Engineering tasks")
+        st.download_button("Download PRD (.md)", ss.prd or "", file_name="PRD.md", mime="text/markdown")
+        st.subheader("Engineering tickets -> Jira")
+        st.caption("Demo integration: in production these tickets are pushed to Jira via its REST API. "
+                   "Here they are generated from the PRD and shown as they would appear on the board.")
         if "ntasks" not in ss:
-            if st.button("Generate tasks"):
-                with st.spinner("Creating tasks..."):
+            if st.button("Generate tickets from PRD"):
+                with st.spinner("Breaking the PRD into tickets..."):
                     ss.ntasks = create_tasks(ss.session_id, ss.prd)
                 _rerun()
         else:
-            tasks = q("SELECT TASK_KEY,AREA,ESTIMATE,TITLE FROM PM_MEDIATOR.DISCOVERY.TASK WHERE SESSION_ID=? ORDER BY TASK_KEY", [ss.session_id])
-            import pandas as pd
-            st.dataframe(pd.DataFrame([{"key": t[0], "area": t[1], "est": t[2], "title": t[3]} for t in tasks]))
+            tasks = q("SELECT TASK_KEY,TYPE,AREA,PRIORITY,ESTIMATE,TITLE,DESCRIPTION,STATUS "
+                      "FROM PM_MEDIATOR.DISCOVERY.TASK WHERE SESSION_ID=? ORDER BY TASK_KEY", [ss.session_id])
+            if not ss.get("jira_pushed"):
+                if st.button(f"Create {len(tasks)} tickets in Jira (demo)", type="primary"):
+                    ss.jira_pushed = True
+                    _rerun()
+            else:
+                st.success(f"Created {len(tasks)} tickets on Jira board NOMY (demo).")
+            for t in tasks:
+                st.markdown(render_jira(t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]),
+                            unsafe_allow_html=True)
 
     st.markdown("---")
     if st.button("New discovery"):

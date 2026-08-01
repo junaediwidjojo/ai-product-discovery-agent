@@ -80,6 +80,8 @@ create or replace TABLE PM_MEDIATOR.DISCOVERY.TASK (
 	ESTIMATE VARCHAR(16777216),
 	STATUS VARCHAR(16777216) DEFAULT 'proposed',
 	CREATED_AT TIMESTAMP_TZ(9) DEFAULT CURRENT_TIMESTAMP(),
+	TYPE VARCHAR(16777216),
+	PRIORITY VARCHAR(16777216),
 	primary key (TASK_ID)
 );
 CREATE OR REPLACE PROCEDURE PM_MEDIATOR.DISCOVERY.BUILD_OVERVIEW()
@@ -155,19 +157,26 @@ CREATE OR REPLACE PROCEDURE PM_MEDIATOR.DISCOVERY.CREATE_TASKS("P_SESSION" VARCH
 RETURNS NUMBER(38,0)
 LANGUAGE SQL
 EXECUTE AS OWNER
-AS 'DECLARE raw STRING; cleaned STRING; prompt STRING; n INT;
+AS '
+DECLARE raw STRING; cleaned STRING; prompt STRING; n INT;
 BEGIN
-  prompt := ''From the PRD below, produce ONLY a JSON array of 4-7 engineering tasks. Each item: {"title":..., "description":..., "area": one of [frontend,backend,data,qa], "estimate": one of [S,M,L]}.\\n\\nPRD:\\n'' || :P_PRD;
+  prompt := ''From the PRD below, produce ONLY a JSON array of 4-7 engineering tickets a team could drop into Jira. ''
+    || ''Each item: {"title": short imperative summary, "description": 1-2 actionable sentences, ''
+    || ''"type": one of [Story,Task,Bug,Spike], "area": one of [frontend,backend,data,qa], ''
+    || ''"priority": one of [High,Medium,Low], "estimate": one of [1,2,3,5,8] (story points)}. ''
+    || ''Order by priority (High first).\\\\n\\\\nPRD:\\\\n'' || :P_PRD;
   raw := (SELECT AI_COMPLETE(''mistral-large2'', :prompt));
   cleaned := REGEXP_SUBSTR(:raw, ''\\\\[.*\\\\]'', 1, 1, ''s'');
   DELETE FROM PM_MEDIATOR.DISCOVERY.TASK WHERE SESSION_ID = :P_SESSION;
-  INSERT INTO PM_MEDIATOR.DISCOVERY.TASK (TASK_ID, SESSION_ID, TASK_KEY, TITLE, DESCRIPTION, AREA, ESTIMATE)
-  SELECT UUID_STRING(), :P_SESSION, ''T-'' || f.INDEX,
-         f.value:title::string, f.value:description::string, f.value:area::string, f.value:estimate::string
+  INSERT INTO PM_MEDIATOR.DISCOVERY.TASK (TASK_ID, SESSION_ID, TASK_KEY, TITLE, DESCRIPTION, TYPE, AREA, PRIORITY, ESTIMATE, STATUS)
+  SELECT UUID_STRING(), :P_SESSION, ''NOMY-'' || (100 + f.INDEX),
+         f.value:title::string, f.value:description::string, f.value:type::string,
+         f.value:area::string, f.value:priority::string, f.value:estimate::string, ''To Do''
   FROM LATERAL FLATTEN(input => TRY_PARSE_JSON(:cleaned)) f;
   SELECT COUNT(*) INTO :n FROM PM_MEDIATOR.DISCOVERY.TASK WHERE SESSION_ID = :P_SESSION;
   RETURN :n;
-END';
+END;
+';
 CREATE OR REPLACE FUNCTION PM_MEDIATOR.DISCOVERY.DATA_SIGNALS("P_TEXT" VARCHAR)
 RETURNS VARCHAR
 LANGUAGE SQL
@@ -263,15 +272,22 @@ CREATE OR REPLACE PROCEDURE PM_MEDIATOR.DISCOVERY.GENERATE_PRD("P_SESSION" VARCH
 RETURNS VARCHAR
 LANGUAGE SQL
 EXECUTE AS OWNER
-AS 'DECLARE md STRING; prompt STRING;
+AS '
+DECLARE md STRING; prompt STRING; sig STRING;
 BEGIN
-  prompt := ''You are a senior product manager. Write a concise engineering-ready PRD in Markdown for THIS REQUEST: "'' || :P_TOPIC ||
-    ''". Stay strictly on the request; use ONLY the context below and do NOT introduce unrelated topics or metrics (e.g. do not discuss refunds unless the request is about refunds). Cite evidence inline; do not invent facts. Sections: ## Problem, ## Evidence and Data, ## Proposed Solution, ## Scope, ## Out of Scope, ## Risks, ## Acceptance Criteria. Under 450 words.\\n\\nCONTEXT:\\n'' || :P_EVIDENCE;
+  sig := ''n/a'';
+  BEGIN sig := (SELECT PM_MEDIATOR.DISCOVERY.DATA_SIGNALS(:P_TOPIC)); EXCEPTION WHEN OTHER THEN sig := ''n/a''; END;
+  prompt := ''You are a senior product manager writing a complete, engineering-ready PRD in GitHub-flavored Markdown for THIS request: "'' || :P_TOPIC || ''". ''
+    || ''Ground everything ONLY in the discovery context, code/doc evidence, and real data below. Cite evidence inline (reference the file/doc names given). Do NOT invent facts and do NOT introduce unrelated topics or metrics (no refunds unless the request is about refunds). If needed data is missing, list it under Open Questions rather than guessing. ''
+    || ''Write a thorough but tight PRD (~500-800 words) with EXACTLY these sections and markdown headings: ''
+    || ''# <concise product title>\\\\n## 1. Summary\\\\n## 2. Problem & Context\\\\n## 3. Goals & Non-Goals\\\\n## 4. Target Users & Personas\\\\n## 5. Current State (from the codebase)\\\\n## 6. Proposed Solution\\\\n## 7. Functional Requirements (numbered, testable)\\\\n## 8. UX Notes\\\\n## 9. Data & Success Metrics\\\\n## 10. Dependencies & Risks\\\\n## 11. Acceptance Criteria (Given/When/Then)\\\\n## 12. Rollout & Milestones\\\\n## 13. Open Questions\\\\n\\\\n''
+    || ''DISCOVERY CONTEXT & EVIDENCE:\\\\n'' || :P_EVIDENCE || ''\\\\n\\\\nREAL DATA SIGNALS:\\\\n'' || :sig;
   md := (SELECT AI_COMPLETE(''mistral-large2'', :prompt));
   DELETE FROM PM_MEDIATOR.DISCOVERY.PRD WHERE SESSION_ID = :P_SESSION;
   INSERT INTO PM_MEDIATOR.DISCOVERY.PRD (SESSION_ID, MARKDOWN) VALUES (:P_SESSION, :md);
   RETURN :md;
-END';
+END;
+';
 CREATE OR REPLACE PROCEDURE PM_MEDIATOR.DISCOVERY.GENERATE_WIREFRAME("P_TOPIC" VARCHAR, "P_EXISTING" VARCHAR, "P_PROPOSED" VARCHAR)
 RETURNS VARCHAR
 LANGUAGE SQL
@@ -470,4 +486,4 @@ create or replace streamlit PM_MEDIATOR.DISCOVERY.DISCOVERY_WORKBENCH
 	root_location='@PM_MEDIATOR.DISCOVERY.APP_STAGE
 	main_file='discovery_app.py'
 	query_warehouse='PM_MEDIATOR_WH'
-	comment='AI Product Discovery Agent - Discovery Workbench';
+	comment='Nomy Explores - AI Product Discovery Facilitator';
