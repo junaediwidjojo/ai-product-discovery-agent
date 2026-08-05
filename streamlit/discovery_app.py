@@ -358,15 +358,41 @@ def coverage_rail(ss):
 
 def evidence_panel(ss):
     ev = ss.get("evidence", [])
-    with st.expander(f"Enterprise knowledge found ({len(ev)})", expanded=False):
+    groups = {"Code": [], "Documentation": [], "Issues / community": []}
+    for e in ev:
+        s = (e.get("source") or "").upper()
+        if "CODE" in s:
+            groups["Code"].append(e)
+        elif "DOC" in s:
+            groups["Documentation"].append(e)
+        else:
+            groups["Issues / community"].append(e)
+    with st.expander(f"Enterprise knowledge ({len(ev)})", expanded=False):
         if not ev:
             st.caption("No related items found yet.")
-        for e in ev:
-            link = f" - [{e['url']}]({e['url']})" if e["url"] else ""
-            st.markdown(f"<span class='pill'>{e['source']}</span> {e['citation']}{link}", unsafe_allow_html=True)
+        for label, items in groups.items():
+            if not items:
+                continue
+            st.markdown(f"**{label}** ({len(items)})")
+            for e in items:
+                link = f" - [link]({e['url']})" if e.get("url") else ""
+                st.markdown(f"<span class='pill'>{esc(e['source'])}</span> {esc(e['citation'])}{link}", unsafe_allow_html=True)
+                snip = " ".join((e.get("content") or "").split())[:140]
+                if snip:
+                    st.caption(snip)
         det = (ss.get("next") or {}).get("detected") or []
         if det:
             st.markdown("**Detected:** " + "; ".join(det))
+
+def data_panel(ss):
+    with st.expander("Live commerce data (SQL)", expanded=False):
+        try:
+            ctx = (ss.get("idea", "") or "") + " " + " ".join(ss.get("focus") or [])
+            sig = q("SELECT PM_MEDIATOR.DISCOVERY.DATA_SIGNALS(?)", [ctx])[0][0]
+        except Exception:
+            sig = ""
+        st.markdown(hl_nums(sig) if sig else "-", unsafe_allow_html=True)
+        st.caption("Computed live via SQL over PM_MEDIATOR.MOCK (modeled by the COMMERCE_SV semantic view). Skill: DATA_SIGNALS().")
 
 def start_discovery(idea, focus=None):
     ss = st.session_state
@@ -479,6 +505,7 @@ elif st.session_state.phase == "interview":
     with right:
         coverage_rail(ss)
         evidence_panel(ss)
+        data_panel(ss)
     with left:
         # --- active question + answer at the TOP so a rerun lands here, not on old history ---
         if ss.get("pending"):
