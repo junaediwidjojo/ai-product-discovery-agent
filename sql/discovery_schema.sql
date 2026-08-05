@@ -193,6 +193,14 @@ CASE
     || (SELECT COUNT(DISTINCT CUSTOMER_ID) FROM PM_MEDIATOR.MOCK.ORDERS) || '' have placed orders; ''
     || (SELECT COUNT(*) FROM (SELECT CUSTOMER_ID FROM PM_MEDIATOR.MOCK.ORDERS GROUP BY CUSTOMER_ID HAVING COUNT(*)>1)) || '' are repeat buyers; ''
     || (SELECT COUNT(DISTINCT CUSTOMER_ID) FROM PM_MEDIATOR.MOCK.CUSTOMER_ADDRESS) || '' have a saved address.''
+  WHEN LOWER(COALESCE(P_TEXT,'''')) RLIKE ''.*(product|catalog|browse|search|variant|size|collection|inventory|stock|assortment|sku).*'' THEN
+    ''Catalog: '' || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.PRODUCT) || '' products across ''
+    || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.PRODUCT_CATEGORY) || '' categories, ''
+    || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.PRODUCT_VARIANT) || '' variants (avg ''
+    || (SELECT ROUND((SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.PRODUCT_VARIANT)/NULLIF((SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.PRODUCT),0),1)) || '' per product); ''
+    || (SELECT COUNT(*) FROM (SELECT PRODUCT_ID FROM PM_MEDIATOR.MOCK.PRODUCT_VARIANT GROUP BY PRODUCT_ID HAVING COUNT(*)=1)) || '' products have only 1 variant; top categories: ''
+    || COALESCE((SELECT LISTAGG(nm||'' (''||c||'')'', '', '') FROM (SELECT pc.NAME nm, COUNT(*) c FROM PM_MEDIATOR.MOCK.PRODUCT_CATEGORY_PRODUCT pcp JOIN PM_MEDIATOR.MOCK.PRODUCT_CATEGORY pc ON pc.ID=pcp.PRODUCT_CATEGORY_ID GROUP BY pc.NAME ORDER BY c DESC LIMIT 3)),''n/a'')
+    || ''; typical item price $'' || (SELECT ROUND(AVG(UNIT_PRICE)) FROM PM_MEDIATOR.MOCK.ORDER_LINE_ITEM WHERE UNIT_PRICE IS NOT NULL) || ''.''
   WHEN LOWER(COALESCE(P_TEXT,'''')) RLIKE ''.*(checkout|cart|payment|pay|coupon|promo|discount).*'' THEN
     ''Orders & checkout: '' || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.ORDERS) || '' orders (completed ''
     || (SELECT COUNT_IF(STATUS=''completed'') FROM PM_MEDIATOR.MOCK.ORDERS) || '', pending ''
@@ -207,16 +215,12 @@ CASE
     || (SELECT COUNT_IF(STATUS=''requires_action'') FROM PM_MEDIATOR.MOCK.ORDERS) || '' require action, ''
     || (SELECT COUNT_IF(STATUS=''canceled'') FROM PM_MEDIATOR.MOCK.ORDERS) || '' canceled; ''
     || (SELECT COUNT_IF(STATUS<>''completed'') FROM PM_MEDIATOR.MOCK.ORDERS) || '' orders not yet completed.''
-  WHEN LOWER(COALESCE(P_TEXT,'''')) RLIKE ''.*(product|catalog|browse|search|variant|size|collection|inventory|stock).*'' THEN
-    ''Catalog: '' || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.PRODUCT) || '' products across ''
-    || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.PRODUCT_CATEGORY) || '' categories, ''
-    || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.PRODUCT_VARIANT) || '' variants; typical item price $''
-    || (SELECT ROUND(AVG(UNIT_PRICE)) FROM PM_MEDIATOR.MOCK.ORDER_LINE_ITEM WHERE UNIT_PRICE IS NOT NULL) || ''.''
   ELSE
     ''Store scale: '' || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.ORDERS) || '' orders from ''
     || (SELECT COUNT(DISTINCT CUSTOMER_ID) FROM PM_MEDIATOR.MOCK.ORDERS) || '' customers; ''
     || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.PRODUCT) || '' products across ''
-    || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.PRODUCT_CATEGORY) || '' categories.''
+    || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.PRODUCT_CATEGORY) || '' categories; ''
+    || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.PRODUCT_VARIANT) || '' variants.''
 END
 ';
 CREATE OR REPLACE PROCEDURE PM_MEDIATOR.DISCOVERY.DISCOVERY_ARTIFACTS("P_TRANSCRIPT" VARCHAR, "P_EVIDENCE" VARCHAR)
@@ -246,20 +250,20 @@ BEGIN
   sig := ''n/a'';
   BEGIN sig := (SELECT PM_MEDIATOR.DISCOVERY.DATA_SIGNALS(:P_TRANSCRIPT)); EXCEPTION WHEN OTHER THEN sig := ''n/a''; END;
   prompt := ''You are a Senior Product Manager running a discovery workshop with a business stakeholder. ''
-    || ''Your job is to understand the PROBLEM: business goal, affected users, current workflow, frequency, success metrics, constraints, assumptions, alternatives.\\n\\n''
+    || ''Your job is to understand the PROBLEM: business goal, affected users, current workflow, frequency, success metrics, constraints, assumptions/unknowns, alternatives.\\n\\n''
     || ''TRANSCRIPT so far:\\n'' || :P_TRANSCRIPT || ''\\n\\n''
     || ''ENTERPRISE KNOWLEDGE - actual CODE and DOCUMENTATION content (with citations):\\n'' || :P_EVIDENCE || ''\\n\\n''
-    || ''DATA SIGNALS relevant to this request (ACTUAL numbers from the database, scoped to the topic):\\n'' || :sig || ''\\n\\n''
+    || ''DATA SIGNALS relevant to this request (ACTUAL numbers from the Snowflake commerce database, scoped to the topic):\\n'' || :sig || ''\\n\\n''
     || ''Questions asked so far: '' || TO_VARCHAR(:P_ASKED) || ''.\\n\\n''
-    || ''ALREADY-EXISTS CHECK (do this FIRST): Inspect the ENTERPRISE KNOWLEDGE code/docs. If the capability the stakeholder is asking for ALREADY EXISTS in the code (e.g. they ask for a voucher/promo field and the checkout code already contains a promotion-code input), set "already_exists"=true and put a one-sentence explanation in "existing_note" that cites what exists and where (quote the code/file). When already_exists=true you MUST NOT run generic discovery as if the feature is new: set "question" to acknowledge it already exists and ask what SPECIFICALLY they want to IMPROVE about the current implementation (e.g. discoverability, auto-apply, eligibility rules, UI/UX, performance), and set "working_problem" to frame it as improving the existing feature. If it does not exist, already_exists=false and existing_note empty.\\n''
+    || ''ALREADY-EXISTS CHECK (do this FIRST): Inspect the ENTERPRISE KNOWLEDGE code/docs. If the capability the stakeholder is asking for ALREADY EXISTS in the code, set "already_exists"=true and put a one-sentence explanation in "existing_note" citing what exists and where. Then set "question" to acknowledge it exists and ask what SPECIFICALLY they want to IMPROVE, and set "working_problem" to frame it as improving the existing feature. Otherwise already_exists=false and existing_note empty.\\n''
     || ''USE THE CODE: for technical/implementation facts, especially current_workflow, INFER from the code and treat it as covered; do NOT ask the stakeholder how the system works.\\n''
-    || ''DATA-FIRST: never ask the stakeholder for rates/frequencies/counts (read them from DATA SIGNALS). If a "DATA GAP" is noted, acknowledge it in data_insight instead of asking for a guess.\\n''
-    || ''RELEVANCE: cite figures in "data_insight" ONLY if relevant; else data_insight="". Never mention returns/refunds unless the request is about returns/refunds/exchanges.\\n''
-    || ''COVERAGE RUBRIC (score 8 dims from TRANSCRIPT+CODE+DATA): 0 none;30-59 partial;60-89 clear;90-100 specifics. current_workflow may be scored from code. "confidence"=ROUNDED AVERAGE of the 8. "stop" true only if confidence>=78 OR asked>=8.\\n''
+    || ''DATA-FORWARD (important): Snowflake data is a core asset - be GENEROUS in surfacing it. Whenever the DATA SIGNALS contain numbers that relate to the topic (the usual case), populate "data_insight" with the most relevant SPECIFIC figures, and where natural weave a real number into the question itself to make it concrete. Only leave data_insight empty if the signals are genuinely unrelated. Never fabricate numbers; if a needed metric is missing or marked DATA GAP, say so rather than guessing. Never mention returns/refunds unless the request is about returns/refunds/exchanges.\\n''
+    || ''DATA-FIRST: do NOT ask the stakeholder for rates/counts/percentages the database can answer - read them from the DATA SIGNALS. Reserve questions for goals, qualitative pain, priorities, and constraints.\\n''
+    || ''COVERAGE RUBRIC (score 8 dims from TRANSCRIPT+CODE+DATA): 0 none; 30-59 partial; 60-89 clear; 90-100 specifics. current_workflow may be scored from code. "confidence" = ROUNDED AVERAGE of the 8. "stop" true only if confidence >= 78 OR asked >= 8.\\n''
     || ''NEXT QUESTION: the single most valuable question on the lowest-covered dimension that ONLY the stakeholder can answer; never repeat an answered question.\\n''
-    || ''SPECS ARE FINE: accept a proposed solution/spec; steer to the underlying problem.\\n''
-    || ''ADJUSTMENT (sparingly): adjustment.needed=true ONLY for genuine CONTRADICTIONS between answers or with data. Otherwise false.\\n''
-    || ''OPTIONS: 2-4 plausible ANSWERS to YOUR question (short declarative statements, NOT questions; none end with "?" or start with What/How/Why/When/Who). Reference data figures only where relevant. Put duplicates/conflicts in "detected".\\n''
+    || ''SPECS ARE FINE: accept a proposed solution/spec without judgement; steer toward the underlying problem.\\n''
+    || ''ADJUSTMENT (sparingly): adjustment.needed=true ONLY for genuine CONTRADICTIONS between answers or with the data; put the contradiction in "note" and gently ask to reconcile. Otherwise false.\\n''
+    || ''OPTIONS: 2-4 plausible ANSWERS to YOUR question (short declarative statements, NOT questions; none end with "?" or start with What/How/Why/When/Who). Realistic, distinct. Reference concrete data figures where relevant. Put duplicates/conflicts in "detected".\\n''
     || ''Reply ONLY compact JSON, no prose, no code fences: ''
     || ''{"coverage":{"business_goal":0,"stakeholders":0,"current_workflow":0,"frequency":0,"success_metrics":0,"constraints":0,"assumptions":0,"alternatives":0},''
     || ''"confidence":0,"stop":false,"already_exists":false,"existing_note":"","working_problem":"...","data_insight":"...","adjustment":{"needed":false,"note":"...","reframe":"..."},"question":"...","why":"...","options":["..."],"detected":["..."]}'';
