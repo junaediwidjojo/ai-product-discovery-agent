@@ -116,6 +116,9 @@ Every Snowflake object is versioned as reproducible DDL in [`sql/`](sql/) — `C
 
 ---
 
+## Evaluation (reproducible)
+`python eval.py` runs a scenario matrix against the live skills and writes [`EVAL.md`](EVAL.md). Current result: **9/10 scenarios pass** — existing-capability detection, DATA-GAP honesty, topic-scoped numeric grounding, off-topic refund avoidance, contradiction handling (with no false positives), unsupported-metric abstention, and no-repeat questioning; 100% JSON/procedure success; data present on every turn. (The one miss: a frequency contradiction not flagged — a known limitation, reported honestly.)
+
 ## Honest disclosures
 - Real Medusa seed (orders/products/customers/prices); **return & refund events are synthesized** on the real orders (~12% return rate, real reason labels). This dev export does not include cart/checkout-session/promotion tables — the app surfaces that as a data gap rather than fabricating cart-abandonment numbers.
 - The Jira integration is a **clearly labeled demo** (tickets are generated and shown as they would appear on the board); production would push via the Jira REST API.

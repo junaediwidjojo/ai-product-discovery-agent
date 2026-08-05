@@ -77,6 +77,10 @@ python verify_discovery.py                            # non-destructive skill ch
 
 `gen_refunds.py` exists because the Medusa dev export ships the return/refund *tables* empty; it populates them with realistic, weighted events grounded in the real orders so the returns/refunds data-grounding (and the RICE returns case) has believable numbers.
 
+## Evaluation
+
+An automated scenario matrix runs against the **live** skills (`python eval.py`, results in [`EVAL.md`](EVAL.md)): **9/10 scenarios pass**, covering existing-capability detection, missing-data (DATA GAP) honesty, topic-scoped numeric grounding, off-topic refund avoidance, contradiction handling, unsupported-metric abstention, and no-repeat questioning — with 100% JSON/procedure success and data grounded on every turn.
+
 ## Disclosures
 
 - Real Medusa seed (orders / products / customers / prices); **return & refund events are synthesized** on the real orders. This dev export does **not** include cart / checkout-session / promotion tables — the app surfaces that as a data gap rather than fabricating cart-abandonment numbers.
