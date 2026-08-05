@@ -162,9 +162,9 @@ def evidence_str(ev):
     parts = []
     for e in ev:
         snip = " ".join((e.get("content") or "").split()).strip()
-        snip = (" :: " + snip[:240]) if snip else ""
+        snip = (" :: " + snip[:160]) if snip else ""
         parts.append(f"[{e['source']}] {e['citation']}{snip}")
-    return " | ".join(parts)[:3000]
+    return " | ".join(parts)[:1500]
 
 def transcript_str(idea, turns):
     ss = st.session_state

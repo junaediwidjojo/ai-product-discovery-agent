@@ -249,24 +249,24 @@ DECLARE raw STRING; cleaned STRING; prompt STRING; sig STRING;
 BEGIN
   sig := ''n/a'';
   BEGIN sig := (SELECT PM_MEDIATOR.DISCOVERY.DATA_SIGNALS(:P_TRANSCRIPT)); EXCEPTION WHEN OTHER THEN sig := ''n/a''; END;
-  prompt := ''You are a Senior Product Manager running a discovery workshop with a business stakeholder. ''
-    || ''Your job is to understand the PROBLEM: business goal, affected users, current workflow, frequency, success metrics, constraints, assumptions/unknowns, alternatives.\\n\\n''
-    || ''TRANSCRIPT so far:\\n'' || :P_TRANSCRIPT || ''\\n\\n''
-    || ''ENTERPRISE KNOWLEDGE - actual CODE and DOCUMENTATION content (with citations):\\n'' || :P_EVIDENCE || ''\\n\\n''
-    || ''DATA SIGNALS relevant to this request (ACTUAL numbers from the Snowflake commerce database, already scoped to the topic):\\n'' || :sig || ''\\n\\n''
-    || ''Questions asked so far: '' || TO_VARCHAR(:P_ASKED) || ''.\\n\\n''
-    || ''ALREADY-EXISTS CHECK (do this FIRST): Inspect the ENTERPRISE KNOWLEDGE code/docs. If the capability the stakeholder is asking for ALREADY EXISTS in the code, set "already_exists"=true and put a one-sentence explanation in "existing_note" citing what exists and where. Then set "question" to acknowledge it exists and ask what SPECIFICALLY they want to IMPROVE, and set "working_problem" to frame it as improving the existing feature. Otherwise already_exists=false and existing_note empty.\\n''
-    || ''USE THE CODE: for technical/implementation facts, especially current_workflow, INFER from the code and treat it as covered; do NOT ask the stakeholder how the system works.\\n''
-    || ''DATA-FORWARD (REQUIRED): The DATA SIGNALS above are already scoped to this topic and are NOT empty. You MUST put at least one specific real figure from them into "data_insight" every turn (1-2 sentences), and weave a real number into the question when natural. NEVER leave data_insight blank. Do not fabricate numbers; if a metric is marked DATA GAP, state the gap. Never mention returns/refunds unless the request is about returns/refunds/exchanges.\\n''
-    || ''DATA-FIRST: do NOT ask the stakeholder for rates/counts/percentages the database can answer - read them from the DATA SIGNALS. Reserve questions for goals, qualitative pain, priorities, and constraints.\\n''
-    || ''COVERAGE RUBRIC (score 8 dims from TRANSCRIPT+CODE+DATA): 0 none; 30-59 partial; 60-89 clear; 90-100 specifics. current_workflow may be scored from code. "confidence" = ROUNDED AVERAGE of the 8. "stop" true only if confidence >= 78 OR asked >= 8.\\n''
-    || ''NEXT QUESTION: the single most valuable question on the lowest-covered dimension that ONLY the stakeholder can answer; NEVER repeat or lightly reword a question already in the transcript.\\n''
-    || ''SPECS ARE FINE: accept a proposed solution/spec without judgement; steer toward the underlying problem.\\n''
-    || ''ADJUSTMENT (sparingly): adjustment.needed=true ONLY for genuine CONTRADICTIONS between answers or with the data; put the contradiction in "note" and gently ask to reconcile. Otherwise false.\\n''
-    || ''OPTIONS: 2-4 plausible ANSWERS to YOUR question (short declarative statements, NOT questions; none end with "?" or start with What/How/Why/When/Who). Realistic, distinct. Reference concrete data figures where relevant. Put duplicates/conflicts in "detected".\\n''
-    || ''Reply ONLY compact JSON, no prose, no code fences: ''
+  prompt := ''You are a Senior PM running product discovery. Understand the real PROBLEM (goal, users, current workflow, frequency, success metrics, constraints, assumptions, alternatives); do not take the request at face value.\\n''
+    || ''TRANSCRIPT:\\n'' || :P_TRANSCRIPT || ''\\n''
+    || ''CODE/DOCS (real, cited):\\n'' || :P_EVIDENCE || ''\\n''
+    || ''DATA SIGNALS (real, topic-scoped, never empty):\\n'' || :sig || ''\\n''
+    || ''Questions asked: '' || TO_VARCHAR(:P_ASKED) || ''.\\n''
+    || ''RULES:\\n''
+    || ''1) ALREADY-EXISTS: if the requested capability already exists in the code, set already_exists=true, existing_note=one line citing it, and make the question ask what to IMPROVE (working_problem = improve existing).\\n''
+    || ''2) Infer current_workflow from the code; never ask the stakeholder how the system works.\\n''
+    || ''3) DATA: put at least one real figure from DATA SIGNALS into data_insight EVERY turn (never blank); weave a number into the question when natural; never invent numbers; state any DATA GAP; never mention returns/refunds unless the topic is returns/refunds/exchanges.\\n''
+    || ''4) Do not ask for counts/rates the data can answer; ask only goals, qualitative pain, priorities, constraints.\\n''
+    || ''5) Score each of the 8 coverage dims 0-100 from transcript+code+data; confidence = rounded average; stop=true only if confidence>=78 or asked>=8.\\n''
+    || ''6) Ask ONE new question on the lowest-covered dimension; never repeat or reword an answered question.\\n''
+    || ''7) Accept a proposed spec without judgement; steer toward the underlying problem.\\n''
+    || ''8) adjustment.needed=true ONLY for a genuine contradiction (put it in note, gently ask to reconcile); else false with empty note/reframe.\\n''
+    || ''9) options = 2-4 short declarative ANSWERS to your question (not questions; none end with "?" or start with What/How/Why/When/Who); distinct; cite a data figure where relevant.\\n''
+    || ''Reply ONLY compact JSON, no prose or fences: ''
     || ''{"coverage":{"business_goal":0,"stakeholders":0,"current_workflow":0,"frequency":0,"success_metrics":0,"constraints":0,"assumptions":0,"alternatives":0},''
-    || ''"confidence":0,"stop":false,"already_exists":false,"existing_note":"","working_problem":"...","data_insight":"...","adjustment":{"needed":false,"note":"...","reframe":"..."},"question":"...","why":"...","options":["..."],"detected":["..."]}'';
+    || ''"confidence":0,"stop":false,"already_exists":false,"existing_note":"","working_problem":"...","data_insight":"...","adjustment":{"needed":false,"note":"","reframe":""},"question":"...","why":"...","options":["..."],"detected":[]}'';
   raw := (SELECT AI_COMPLETE(''mistral-large2'', :prompt));
   cleaned := REGEXP_SUBSTR(:raw, ''\\\\{.*\\\\}'', 1, 1, ''s'');
   RETURN TRY_PARSE_JSON(:cleaned);
