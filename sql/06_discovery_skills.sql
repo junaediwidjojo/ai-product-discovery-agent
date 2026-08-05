@@ -258,7 +258,7 @@ BEGIN
     || ''DATA SIGNALS (real, topic-scoped, never empty):\\n'' || :sig || ''\\n''
     || ''Questions asked: '' || TO_VARCHAR(:P_ASKED) || ''.\\n''
     || ''RULES:\\n''
-    || ''1) ALREADY-EXISTS: if the requested capability already exists in the code, set already_exists=true, existing_note=one line citing it, and make the question ask what to IMPROVE (working_problem = improve existing).\\n''
+    || ''1) EXISTING-CAPABILITY / GAP: if the requested capability already exists in the code, set already_exists=true and existing_note=one line citing it. Code existing does NOT mean the problem is solved. Make the question probe the GAP - discoverability, correctness/validation, workflow fit, eligibility rules, or adoption (e.g. "X already exists in the code - is the issue that customers cannot find it, that it fails, or that it does not cover this case?"). working_problem = closing the specific gap in the existing feature. Do NOT tell the user to stop.\\n''
     || ''2) Infer current_workflow from the code; never ask the stakeholder how the system works.\\n''
     || ''3) DATA: put at least one real figure from DATA SIGNALS into data_insight EVERY turn (never blank); weave a number into the question when natural; never invent numbers; state any DATA GAP; never mention returns/refunds unless the topic is returns/refunds/exchanges.\\n''
     || ''4) Do not ask for counts/rates the data can answer; ask only goals, qualitative pain, priorities, constraints.\\n''

@@ -491,10 +491,9 @@ elif st.session_state.phase == "interview":
         else:
             nxt = ss.get("next") or {}
             if nxt.get("already_exists") and str(nxt.get("existing_note", "")).strip():
-                st.warning("Heads up - this looks already built in the codebase. "
-                           + str(nxt.get("existing_note", ""))
-                           + "  Let's focus on what to improve (or stop here if it already covers the need).")
-                if st.button("This already covers the need - stop discovery", key="halt"):
+                st.info("Existing capability detected in the code - " + str(nxt.get("existing_note", ""))
+                        + "  This doesn't mean the problem is solved; let's pinpoint the gap (discoverability, correctness, workflow fit, eligibility, or adoption).")
+                if st.button("It fully covers the need - end discovery", key="halt"):
                     ss.halt_note = str(nxt.get("existing_note", ""))
                     ss.phase = "halted"
                     _rerun()
@@ -544,13 +543,18 @@ elif st.session_state.phase == "interview":
 # ================= PHASE: HALTED (feature already exists) =================
 elif st.session_state.phase == "halted":
     ss = st.session_state
-    st.subheader("Discovery stopped - feature already exists")
+    st.subheader("Existing capability - no new build needed")
     if str(ss.get("halt_note", "")).strip():
-        st.warning(ss.get("halt_note", ""))
-    st.markdown("**Recommendation:** this capability already exists in the codebase, so a new build isn't warranted. "
-                "Open a focused improvement ticket for the specific gap (discoverability, UX, rules, performance) instead of a greenfield project.")
+        st.info(ss.get("halt_note", ""))
+    st.markdown("The stakeholder confirmed the existing feature covers the need. "
+                "**Recommendation:** skip a greenfield build; if a gap surfaces later (discoverability, "
+                "correctness, eligibility, adoption), open a focused improvement ticket instead.")
     st.caption(f"Original idea: {ss.get('idea','')}")
-    if st.button("Start a new discovery"):
+    c1, c2 = st.columns(2)
+    if c1.button("Resume - investigate the gap"):
+        ss.phase = "interview"
+        _rerun()
+    if c2.button("Start a new discovery"):
         for k in list(st.session_state.keys()):
             del st.session_state[k]
         _rerun()
