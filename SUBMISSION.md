@@ -76,7 +76,7 @@ flowchart TB
 4. **Synthesize →** `DISCOVERY_ARTIFACTS` produces the business brief; PM approval gates the rest.
 5. **Act →** `SCORE_RICE` (discovery-aligned), `GENERATE_PRD` (13-section, data-grounded), `CREATE_TASKS` (Jira-ready tickets).
 
-**Cortex Code CLI skills / capabilities used** (each independently callable, also exposed via the native `PRODUCT_DISCOVERY_AGENT`):
+**Cortex Code CLI skills / capabilities used** (each independently callable via SQL; the app is the primary orchestrator, and the commerce-Q&A + knowledge-search capabilities are also wired into the native `PRODUCT_DISCOVERY_AGENT`):
 
 | Skill | Type | Role in the flow |
 |-------|------|------------------|
@@ -99,7 +99,7 @@ Every Snowflake object is versioned as reproducible DDL in [`sql/`](sql/) — `C
 ## 3. Impact Statement
 
 **Measurable outcomes**
-- **Discovery cycle time:** collapses the typical **3–5 stakeholder/PM meetings** per idea into a single self-serve session (minutes), producing a PM-ready brief + PRD + tickets.
+- **Discovery cycle time (target):** aims to reduce discovery from an assumed baseline of **3–5 stakeholder/PM meetings** per idea to one facilitated self-serve session plus a PM review, producing a PM-ready brief + PRD + tickets. (Target, not yet validated with a pilot — see below.)
 - **Fewer wrong/duplicate builds:** every request is checked against the **actual codebase**; already-built features (e.g., the existing checkout promotion-code input) are flagged and hard-stopped before any spec is written.
 - **Decisions grounded in real data:** questions and prioritization cite live numbers (e.g., **1,200 orders, 527 not-completed (44%), 101 in `requires_action`, 144 returns**) instead of opinions; when data is missing (no cart/abandonment tables) it is flagged as a gap rather than guessed.
 - **Consistency:** every idea yields the same structured artifacts (8-dimension coverage, RICE with bands, 13-section PRD, estimated tickets), reducing brief-quality variance across PMs.

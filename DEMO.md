@@ -1,57 +1,39 @@
-# AI Product Discovery Agent - Demo Script
+# Nomy Explores — Demo Script (≈3 minutes)
 
-Snowflake CoCo CLI Hackathon | Category: AI-Native Data Application
+Snowflake CoCo CLI Hackathon · Category: AI-Native Data Application
 
-## One-line pitch
-A Product Manager mediator that turns a plain business request into an evidence-grounded
-recommendation, PRD, wireframe, and engineering tasks - reasoning across enterprise DATA + CODE +
-DOCS + COMMUNITY, entirely on Snowflake-native services, built and orchestrated with CoCo CLI.
+## Opening line
+> Teams don't usually fail because they can't write a PRD. They fail because they write a precise PRD for the *wrong* problem. Nomy interviews the stakeholder, reads the current code, checks the business data, and only then recommends what to build.
 
-## Why it scores (map to judging criteria)
-- Real-world relevance: business <-> engineering translation is a universal, expensive gap.
-- Technical execution: native Cortex Agent + Cortex Analyst + Cortex Search + AISQL + stored-proc
-  tools + a normalized knowledge graph. Not a chatbot, not basic RAG.
-- Snowflake-native: everything runs in Snowflake; the app is Streamlit-in-Snowflake.
-- AI reasoning: a transparent Opportunity Score (impact x demand / effort) + human-in-the-loop.
-- Completeness: question -> insight -> recommendation -> ACTION (tasks persisted).
-- Demo quality: one prompt visibly expands into a full discovery brief.
-- Originality: cross-source knowledge graph + evidence ledger with a citation for every claim.
+## Scenario
+> "Customers contact support because they can't request a return from their order page."
 
-## Live demo (3 minutes)
-1. Open Snowsight -> Projects -> Streamlit -> DISCOVERY_WORKBENCH.
-2. Type: "I want refunds".
-3. Watch it expand:
-   - Intent -> topic=refund.
-   - Impact (Cortex Analyst / COMMERCE_SV): 12% return rate on 1,200 orders; top reason
-     "Size too small" ($8.3K). [source shown]
-   - Evidence (Cortex Search / KNOWLEDGE_SEARCH), each cited:
-     - CODE: apps/storefront/src/modules/order/components/help/index.tsx:13 - "Returns & Exchanges"
-       is a static /contact link; no self-serve returns.
-     - DOCS: "Create Order Returns in the Storefront" - how it SHOULD work.
-     - COMMUNITY: "Refund workflow can report success after partial refund failures" + 5 more.
-   - Clarifying question (human-in-the-loop): "Self-serve for all reasons, or sizing-first (top driver)?"
-   - Opportunity Score: ~8/10 with impact/demand/effort breakdown.
-   - Existing vs Proposed wireframe.
-   - Grounded PRD (expandable).
-   - 7 engineering tasks -> click "Approve & create tasks".
-4. Close: "Every number and claim has a citation, and it ended by creating real tickets."
+(Focus chips: **Order Journey**, **Returns & Refunds**.)
 
-## Architecture talking points
-- Two data planes: operational (MOCK) vs knowledge graph (KNOWLEDGE, normalized supertype/subtype
-  + graph edges + provenance). DB schema itself is cataloged as knowledge (DB_TABLE/DB_COLUMN).
-- Native Cortex Agent PRODUCT_DISCOVERY_AGENT (Analyst + Search tools) is the reusable reasoning engine.
-- Action tools are stored procedures = reusable agent tools (score, PRD, wireframe, tasks).
-- CoCo CLI built all of it via its skills (semantic-view, search-optimization, cortex-agent), and the
-  product-discovery skill encodes/orchestrates the workflow.
-- Robustness: Resource Monitor hard cap; graceful "insufficient data"; standardized on mistral-large2.
+## Run sheet
 
-## Object inventory
-- PM_MEDIATOR.MOCK: 68 commerce tables + synthesized refund domain; COMMERCE_SV semantic view;
-  3 specialized Cortex Search services; DTC_STARTER_REPO git object.
-- PM_MEDIATOR.KNOWLEDGE: normalized model + unified KNOWLEDGE_SEARCH + REFRESH_GIT task.
-- PM_MEDIATOR.DISCOVERY: SESSION/EVIDENCE/IMPACT/RECOMMENDATION/PRD/TASK, @ARTIFACTS stage,
-  4 action procedures, PRODUCT_DISCOVERY_AGENT, DISCOVERY_WORKBENCH app.
+| ~Time | Show | What proves the point |
+|------:|------|-----------------------|
+| 0:00–0:20 | Product overview + focus chips; type the request; **Start discovery** | `BUILD_OVERVIEW` / `BUILD_TAXONOMY` (repo-derived) |
+| 0:20–1:20 | Answer **3** questions. Point at the **"From your data"** line (return rate + top reason) and the **Enterprise knowledge** panel showing **code** (the order-help page only links to /contact) | `DATA_SIGNALS` (live metrics) + `RETRIEVE_EVIDENCE` (code-blended) + `DISCOVERY_NEXT` |
+| 1:20–1:35 | Coverage bars + **Discovery Confidence** rise → click **"I have enough → summary"** | `DISCOVERY_NEXT` orchestration |
+| 1:35–2:05 | **Discovery Summary** brief → **Send to PM** → **Approve** | `DISCOVERY_ARTIFACTS` + approval gate |
+| 2:05–2:45 | **RICE** (with bands) → **Generate PRD** (13 sections, Download .md) → **Generate tickets** → Jira cards | `SCORE_RICE` + `GENERATE_PRD` + `CREATE_TASKS` |
+| 2:45–3:00 | Close (see below) | — |
 
-## Extensibility (documented, not faked)
-GitLab MRs, Jira, APIs (OpenAPI), support tickets map cleanly into the KNOWLEDGE model as new
-artifact_types + subtype tables + a connector - no schema redesign.
+## Closing line
+> A generic AI assistant knows how product discovery *should* work. Nomy knows how *this* company's product currently works, what its data says, and what's still unknown.
+
+## Two capabilities to highlight if time allows (10–20s)
+- **Already-built detection:** type "add a voucher field at checkout" → Nomy sees the promotion-code input already exists in the code and pivots to *"what do you want to improve — discoverability, eligibility, validation?"* (investigate the gap, not a blank rebuild).
+- **Honest data gaps:** a checkout-abandonment question → Nomy states the dataset has no cart/abandonment tables rather than inventing a number.
+
+## Reliability tips (for the recording)
+- Do one full dry run first so the warehouse is warm and the SiS package cache is built (avoids a slow first load). `AUTO_SUSPEND` is 300s so mid-demo pauses won't cold-start.
+- Have the 3 answers ready (use the quick-answer chips); stop at 3 questions via "I have enough".
+- **Record with a backup**: keep a screen recording of a known-good run in case a live Cortex call is slow during the session.
+
+## Object inventory (all reproducible — see `sql/`)
+- `MOCK`: Medusa commerce tables (loaded by scripts) + `COMMERCE_SV` semantic view; `DTC_STARTER_REPO` Git object.
+- `KNOWLEDGE`: normalized graph (code/docs/issues) + `KNOWLEDGE_SEARCH` Cortex Search; `REFRESH_GIT` task.
+- `DISCOVERY`: the agent skills, session/artifact tables, `@APP_STAGE`, `PRODUCT_DISCOVERY_AGENT`, `DISCOVERY_WORKBENCH` app.
