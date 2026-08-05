@@ -35,7 +35,7 @@ flowchart TD
 - **Knowledge plane** `PM_MEDIATOR.KNOWLEDGE` — normalized graph over code, docs, and GitHub issues; unified `KNOWLEDGE_SEARCH` Cortex Search service (auto-embedded `snowflake-arctic-embed-m-v1.5`); native Git repository object.
 - **Discovery plane** `PM_MEDIATOR.DISCOVERY` — the SQL "agent skills", transcript/artifact tables, cached repo taxonomy & product overview, `@APP_STAGE`, and the Streamlit app (`DISCOVERY_WORKBENCH`).
 
-Full backend DDL is versioned in [`sql/discovery_schema.sql`](sql/discovery_schema.sql).
+Every Snowflake object is versioned as reproducible DDL in [`sql/`](sql/) (semantic view, Cortex Search, Cortex Agent, discovery skills, Git repository + refresh task) — see [`sql/README.md`](sql/README.md).
 
 ## Agent skills (reusable stored procedures / functions)
 
@@ -70,7 +70,7 @@ python load_medusa.py                                 # load Medusa commerce tab
 python gen_refunds.py                                 # seed the returns/refunds study case: synthetic
                                                       # return+refund events on 12% of the REAL orders
 python index_code.py; python index_docs.py; python index_community.py  # build the knowledge graph (code, docs, issues)
-# apply the Discovery backend (skills, tables, agent): run sql/discovery_schema.sql in Snowsight/snowsql
+# apply the Snowflake backend (semantic view, search, agent, skills, git): run sql/01..07 in order (see sql/README.md)
 python deploy_app.py                                  # PUT app + environment.yml, CREATE STREAMLIT
 python verify_discovery.py                            # non-destructive skill check
 ```

@@ -1,3 +1,6 @@
+-- DISCOVERY: agent-skill procedures/functions, tables, stage, Streamlit object.
+-- (full export of the PM_MEDIATOR.DISCOVERY schema)
+
 create or replace schema PM_MEDIATOR.DISCOVERY;
 
 create or replace TABLE PM_MEDIATOR.DISCOVERY.DISCOVERY_ARTIFACT (

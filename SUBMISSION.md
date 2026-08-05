@@ -92,7 +92,7 @@ flowchart TB
 
 **Data sources:** *structured* — Medusa commerce tables (orders, customers, products, returns/refunds) + `COMMERCE_SV`; *unstructured* — repository code, Medusa documentation, GitHub issues, unified in `KNOWLEDGE_SEARCH`.
 
-Full backend DDL is versioned in [`sql/discovery_schema.sql`](sql/discovery_schema.sql).
+Every Snowflake object is versioned as reproducible DDL in [`sql/`](sql/) — `COMMERCE_SV`, `KNOWLEDGE_SEARCH`, `PRODUCT_DISCOVERY_AGENT`, the discovery skills, and the `DTC_STARTER_REPO` Git object + `REFRESH_GIT` task (see [`sql/README.md`](sql/README.md)).
 
 ---
 
@@ -121,4 +121,4 @@ Full backend DDL is versioned in [`sql/discovery_schema.sql`](sql/discovery_sche
 - The Jira integration is a **clearly labeled demo** (tickets are generated and shown as they would appear on the board); production would push via the Jira REST API.
 
 ## Built with CoCo CLI
-Designed, built, and self-verified through Cortex Code (CoCo) — schema, data loading, the semantic view, the `KNOWLEDGE_SEARCH` service, all DISCOVERY skills, the native Cortex Agent, and the Streamlit app — using its skills (`semantic-view`, `search-optimization`, `cortex-agent`). A custom `product-discovery` CoCo skill encodes the workflow. Reproducible scripts: `load_medusa.py`, `gen_refunds.py`, `index_*.py`, `deploy_app.py`, plus `sql/discovery_schema.sql`.
+Designed, built, and self-verified through Cortex Code (CoCo) — schema, data loading, the semantic view, the `KNOWLEDGE_SEARCH` service, all DISCOVERY skills, the native Cortex Agent, and the Streamlit app — using its skills (`semantic-view`, `search-optimization`, `cortex-agent`). A custom `product-discovery` CoCo skill encodes the workflow. Reproducible scripts: `load_medusa.py`, `gen_refunds.py`, `index_*.py`, `deploy_app.py`, plus the ordered DDL in `sql/` (`01..07`).
