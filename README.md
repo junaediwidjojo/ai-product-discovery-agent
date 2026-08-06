@@ -8,7 +8,7 @@ A Snowflake-native **product discovery facilitator**. Business stakeholders desc
 
 Every question Nomy asks is grounded in **three sources at once**, all inside Snowflake:
 
-1. **The real codebase & docs** — Cortex Search over a normalized knowledge graph. Retrieval is *blended* to always include code files, so Nomy **reads the current workflow from the repo instead of asking** the stakeholder to describe implementation. If a requested feature already exists in the code, it says so and pivots to "what do you want to improve?".
+1. **The real codebase & docs** — Cortex Search over a normalized knowledge graph. Retrieval is *blended* to always include code files, so Nomy **reads the current workflow from the repo instead of asking** the stakeholder to describe implementation. Existing capabilities are detected before planning: Nomy investigates whether the remaining gap is discoverability, correctness, workflow fit, eligibility or adoption, and recommends **no new build only when the stakeholder confirms the current capability fully covers the need**.
 2. **Live business data** — topic-aware metrics computed on the commerce tables (`DATA_SIGNALS`). A checkout question gets order-status numbers; an accounts question gets customer numbers; returns get return reasons. It **never invents numbers** and explicitly flags **data gaps** (e.g. carts/abandonment aren't captured) instead of asking the stakeholder to guess.
 3. **The running transcript** — with per-dimension coverage + an overall Discovery Confidence.
 
@@ -26,7 +26,7 @@ flowchart TD
   Conf -->|low| Interview
   Conf -->|>= 78% or user stops| Summary["Discovery Summary (business brief)"]
   Summary --> PM["Product Manager Review + Approve"]
-  PM -->|approved| Artifacts["RICE (discovery-aligned), existing-vs-proposed mock, PRD, tasks"]
+  PM -->|approved| Artifacts["RICE (discovery-aligned), optional interface illustration, PRD, persisted Jira-ready tasks"]
 ```
 
 ## Architecture (all Snowflake-native)
@@ -41,7 +41,7 @@ Every Snowflake object is versioned as reproducible DDL in [`sql/`](sql/) (seman
 
 | Skill | Purpose |
 |-------|---------|
-| `DISCOVERY_NEXT` | Senior-PM brain: scores coverage + confidence, picks the single best next question grounded in code + data + transcript, debates contradictions, and flags already-built features |
+| `DISCOVERY_NEXT` | Senior-PM brain: scores coverage + confidence, picks the single best next question, debates contradictions, and detects already-built features. Computes live metrics via `DATA_SIGNALS` internally; enterprise evidence is retrieved by the orchestrator (`RETRIEVE_EVIDENCE`) and passed in — `DISCOVERY_NEXT` does not call Cortex Search itself |
 | `DATA_SIGNALS(text)` | Topic-aware live commerce metrics (accounts / checkout / fulfillment / catalog / returns / general), with honest data-gap notes |
 | `RETRIEVE_EVIDENCE(query, limit, type)` | Cortex Search over code/docs/issues; returns actual content, filterable by artifact type |
 | `BUILD_TAXONOMY` | Analyzes the repo → 10 business-level topic areas (the start-screen focus picker) |
@@ -79,13 +79,17 @@ python verify_discovery.py                            # non-destructive skill ch
 
 ## Evaluation
 
-An automated scenario matrix runs against the **live** skills (`python eval.py`, results in [`EVAL.md`](EVAL.md)): **9/10 scenarios pass**, covering existing-capability detection, missing-data (DATA GAP) honesty, topic-scoped numeric grounding, off-topic refund avoidance, contradiction handling, unsupported-metric abstention, and no-repeat questioning — with 100% JSON/procedure success and data grounded on every turn.
+Two evaluation layers run against the **live** Snowflake backend (`python eval.py`, results in [`EVAL.md`](EVAL.md)):
+- **Controlled reasoning** — handcrafted evidence is passed into `DISCOVERY_NEXT` to test a specific behavior deterministically (existing-capability detection, DATA-GAP honesty, off-topic avoidance, contradiction handling, unsupported-metric abstention, options-are-answers, no-repeat questioning).
+- **End-to-end Snowflake pipeline** — a natural-language request → `RETRIEVE_EVIDENCE` (Cortex Search) → `DISCOVERY_NEXT` (live metrics via `DATA_SIGNALS`) → `DISCOVERY_ARTIFACTS` summary → artifact persistence, with **retrieval relevance** measured (an on-topic item must actually be retrieved — a non-empty result does not count).
+
+Reported metrics include scenario pass rate, retrieval relevance, JSON/procedure success, data-grounding success, unsupported-metric abstention, and median end-to-end latency. See [`EVAL.md`](EVAL.md) for the current dated run.
 
 ## Disclosures
 
-- Real Medusa seed (orders / products / customers / prices); **return & refund events are synthesized** on the real orders. This dev export does **not** include cart / checkout-session / promotion tables — the app surfaces that as a data gap rather than fabricating cart-abandonment numbers.
-- Downstream PRD/tasks write to a mock `TASK` table (Jira/Linear is a documented extension).
+- Real Medusa seed (orders / products / customers / prices); **return & refund events are synthesized on top of the real seed orders** (~12% return rate, real reason labels). This dev export does **not** include cart / checkout-session / promotion tables — the app surfaces that as a data gap rather than fabricating cart-abandonment numbers.
+- Engineering tickets are generated from the PRD and **persisted as Jira-ready tasks in Snowflake** (`DISCOVERY.TASK`). The Jira board interaction is a **labeled demonstration** and does **not** call the real Jira REST API.
 
 ## Built with CoCo CLI
 
-Designed, built, and self-verified through Cortex Code (CoCo), using its skills (`semantic-view`, `search-optimization`, `cortex-agent`). A custom `product-discovery` CoCo skill encodes the workflow.
+Cortex Code (CoCo) was used to **build, orchestrate, and validate** the Snowflake resources — the schema, data loading, the `COMMERCE_SV` semantic view, the `KNOWLEDGE_SEARCH` service, the discovery skills, and the native Cortex Agent — using its skills (`semantic-view`, `search-optimization`, `cortex-agent`); a custom `product-discovery` CoCo skill encodes the workflow. At runtime the **Streamlit app is the orchestrator** that composes the SQL skills directly. The native `PRODUCT_DISCOVERY_AGENT` additionally exposes commerce Q&A (Cortex Analyst / `COMMERCE_SV`) and enterprise search (`KNOWLEDGE_SEARCH`) as reusable agent tools.

@@ -24,7 +24,7 @@ Post-approve: SCORE_RICE ─► GENERATE_PRD ─► CREATE_TASKS (Jira-ready)
 | `BUILD_TAXONOMY()` | proc | repo → 10 business focus areas (cached in `REPO_TAXONOMY`) | AISQL + SQL |
 | `RETRIEVE_EVIDENCE(query, limit, type)` | proc | query → cited code/doc/issue **content** (blended to always include code) | Cortex Search `KNOWLEDGE_SEARCH` |
 | `DATA_SIGNALS(text)` | function | request text → topic-scoped live metrics (accounts / checkout / fulfillment / catalog / returns / general); flags data gaps | SQL over `MOCK` (semantics of `COMMERCE_SV`) |
-| `DISCOVERY_NEXT(transcript, evidence, asked)` | proc | context → `{coverage, confidence, stop, question, why, options, data_insight, already_exists, existing_note, adjustment, detected}` | AISQL `mistral-large2` + the two skills above |
+| `DISCOVERY_NEXT(transcript, evidence, asked)` | proc | context → `{coverage, confidence, stop, question, why, options, data_insight, already_exists, existing_note, adjustment, detected}` | AISQL `mistral-large2`; calls `DATA_SIGNALS` **internally**; consumes the `RETRIEVE_EVIDENCE` output passed in by the app (does **not** call Cortex Search itself) |
 | `DISCOVERY_ARTIFACTS(transcript, evidence)` | proc | transcript → PM-ready business brief | AISQL |
 | `SCORE_RICE(topic, discovery_confidence)` | proc | topic → RICE with discovery-aligned confidence + Low/Med/High bands | SQL over `MOCK`+`KNOWLEDGE` |
 | `GENERATE_PRD(session, topic, ctx)` | proc | context → full 13-section, data-grounded PRD (persisted) | AISQL |

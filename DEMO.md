@@ -16,9 +16,9 @@ Snowflake CoCo CLI Hackathon · Category: AI-Native Data Application
 |------:|------|-----------------------|
 | 0:00–0:20 | Product overview + focus chips; type the request; **Start discovery** | `BUILD_OVERVIEW` / `BUILD_TAXONOMY` (repo-derived) |
 | 0:20–1:20 | Answer **3** questions. Point at the **"From your data"** line (return rate + top reason) and the **Enterprise knowledge** panel showing **code** (the order-help page only links to /contact) | `DATA_SIGNALS` (live metrics) + `RETRIEVE_EVIDENCE` (code-blended) + `DISCOVERY_NEXT` |
-| 1:20–1:35 | Coverage bars + **Discovery Confidence** rise → click **"I have enough → summary"** | `DISCOVERY_NEXT` orchestration |
+| 1:20–1:35 | Coverage bars + **Discovery Confidence** rise → click **"I have enough → summary"** | app orchestration + `DISCOVERY_NEXT` |
 | 1:35–2:05 | **Discovery Summary** brief → **Send to PM** → **Approve** | `DISCOVERY_ARTIFACTS` + approval gate |
-| 2:05–2:45 | **RICE** (with bands) → **Generate PRD** (13 sections, Download .md) → **Generate tickets** → Jira cards | `SCORE_RICE` + `GENERATE_PRD` + `CREATE_TASKS` |
+| 2:05–2:45 | **RICE** (with bands) → **Generate PRD** (13 sections, Download .md) → **Generate tickets** → Jira-ready cards (labeled demo, no real Jira API) | `SCORE_RICE` + `GENERATE_PRD` + `CREATE_TASKS` |
 | 2:45–3:00 | Close (see below) | — |
 
 ## Closing line

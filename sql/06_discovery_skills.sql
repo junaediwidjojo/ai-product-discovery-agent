@@ -185,18 +185,18 @@ RETURNS VARCHAR
 LANGUAGE SQL
 AS '
 CASE
-  WHEN LOWER(COALESCE(P_TEXT,'''')) RLIKE ''.*(refund|return|exchange|rma).*'' THEN
+  WHEN REGEXP_REPLACE(LOWER(COALESCE(P_TEXT,'''')),''[[:space:]]+'','' '') RLIKE ''.*(refund|return|exchange|rma).*'' THEN
     ''Returns & refunds: '' || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK."RETURN") || '' returns (''
     || (SELECT ROUND(100.0*(SELECT COUNT(*) FROM PM_MEDIATOR.MOCK."RETURN")/NULLIF((SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.ORDERS),0))) || ''% of orders); avg ''
     || COALESCE((SELECT TO_VARCHAR(ROUND(AVG(DATEDIFF(''day'',REQUESTED_AT,RECEIVED_AT)),1)) FROM PM_MEDIATOR.MOCK."RETURN" WHERE RECEIVED_AT IS NOT NULL AND REQUESTED_AT IS NOT NULL),''?'') || '' days to process; top reasons: ''
     || COALESCE((SELECT LISTAGG(lbl||'' (''||c||'')'', '', '') FROM (SELECT COALESCE(rr.LABEL,rr.VALUE,''unknown'') lbl, COUNT(*) c FROM PM_MEDIATOR.MOCK.RETURN_ITEM ri LEFT JOIN PM_MEDIATOR.MOCK.RETURN_REASON rr ON ri.REASON_ID=rr.ID GROUP BY 1 ORDER BY c DESC LIMIT 3)),''n/a'')
     || ''; refunds '' || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.REFUND) || '' totaling $'' || (SELECT ROUND(SUM(AMOUNT)) FROM PM_MEDIATOR.MOCK.REFUND) || ''.''
-  WHEN LOWER(COALESCE(P_TEXT,'''')) RLIKE ''.*(account|username|login|log in|sign in|sign-up|signup|register|profile|password|email address).*'' THEN
+  WHEN REGEXP_REPLACE(LOWER(COALESCE(P_TEXT,'''')),''[[:space:]]+'','' '') RLIKE ''.*(account|username|login|log in|sign in|sign-up|signup|register|profile|password|email address).*'' THEN
     ''Customer accounts: '' || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.CUSTOMER) || '' customers; ''
     || (SELECT COUNT(DISTINCT CUSTOMER_ID) FROM PM_MEDIATOR.MOCK.ORDERS) || '' have placed orders; ''
     || (SELECT COUNT(*) FROM (SELECT CUSTOMER_ID FROM PM_MEDIATOR.MOCK.ORDERS GROUP BY CUSTOMER_ID HAVING COUNT(*)>1)) || '' are repeat buyers; ''
     || (SELECT COUNT(DISTINCT CUSTOMER_ID) FROM PM_MEDIATOR.MOCK.CUSTOMER_ADDRESS) || '' have a saved address.''
-  WHEN LOWER(COALESCE(P_TEXT,'''')) RLIKE ''.*(product|catalog|browse|search|variant|size|collection|inventory|stock|assortment|sku).*'' THEN
+  WHEN REGEXP_REPLACE(LOWER(COALESCE(P_TEXT,'''')),''[[:space:]]+'','' '') RLIKE ''.*(product|catalog|browse|search|variant|size|collection|inventory|stock|assortment|sku).*'' THEN
     ''Catalog: '' || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.PRODUCT) || '' products across ''
     || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.PRODUCT_CATEGORY) || '' categories, ''
     || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.PRODUCT_VARIANT) || '' variants (avg ''
@@ -204,7 +204,7 @@ CASE
     || (SELECT COUNT(*) FROM (SELECT PRODUCT_ID FROM PM_MEDIATOR.MOCK.PRODUCT_VARIANT GROUP BY PRODUCT_ID HAVING COUNT(*)=1)) || '' products have only 1 variant; top categories: ''
     || COALESCE((SELECT LISTAGG(nm||'' (''||c||'')'', '', '') FROM (SELECT pc.NAME nm, COUNT(*) c FROM PM_MEDIATOR.MOCK.PRODUCT_CATEGORY_PRODUCT pcp JOIN PM_MEDIATOR.MOCK.PRODUCT_CATEGORY pc ON pc.ID=pcp.PRODUCT_CATEGORY_ID GROUP BY pc.NAME ORDER BY c DESC LIMIT 3)),''n/a'')
     || ''; typical item price $'' || (SELECT ROUND(AVG(UNIT_PRICE)) FROM PM_MEDIATOR.MOCK.ORDER_LINE_ITEM WHERE UNIT_PRICE IS NOT NULL) || ''.''
-  WHEN LOWER(COALESCE(P_TEXT,'''')) RLIKE ''.*(checkout|cart|payment|pay|coupon|promo|discount).*'' THEN
+  WHEN REGEXP_REPLACE(LOWER(COALESCE(P_TEXT,'''')),''[[:space:]]+'','' '') RLIKE ''.*(checkout|cart|payment|pay|coupon|promo|discount).*'' THEN
     ''Orders & checkout: '' || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.ORDERS) || '' orders (completed ''
     || (SELECT COUNT_IF(STATUS=''completed'') FROM PM_MEDIATOR.MOCK.ORDERS) || '', pending ''
     || (SELECT COUNT_IF(STATUS=''pending'') FROM PM_MEDIATOR.MOCK.ORDERS) || '', requires_action ''
@@ -212,7 +212,7 @@ CASE
     || (SELECT COUNT_IF(STATUS=''canceled'') FROM PM_MEDIATOR.MOCK.ORDERS) || ''); typical item price $''
     || (SELECT ROUND(AVG(UNIT_PRICE)) FROM PM_MEDIATOR.MOCK.ORDER_LINE_ITEM WHERE UNIT_PRICE IS NOT NULL) || ''. ''
     || ''DATA GAP: carts, checkout sessions, coupons/discounts and cart-abandonment are NOT captured in the current dataset (no cart/promotion tables), so abandonment or coupon-usage rates cannot be measured from data.''
-  WHEN LOWER(COALESCE(P_TEXT,'''')) RLIKE ''.*(fulfil|ship|deliver|track|order status|dispatch|logistic).*'' THEN
+  WHEN REGEXP_REPLACE(LOWER(COALESCE(P_TEXT,'''')),''[[:space:]]+'','' '') RLIKE ''.*(fulfil|ship|deliver|track|order status|dispatch|logistic).*'' THEN
     ''Fulfillment: '' || (SELECT COUNT(*) FROM PM_MEDIATOR.MOCK.ORDERS) || '' orders; ''
     || (SELECT COUNT_IF(STATUS=''pending'') FROM PM_MEDIATOR.MOCK.ORDERS) || '' pending, ''
     || (SELECT COUNT_IF(STATUS=''requires_action'') FROM PM_MEDIATOR.MOCK.ORDERS) || '' require action, ''
@@ -260,7 +260,7 @@ BEGIN
     || ''RULES:\\n''
     || ''1) EXISTING-CAPABILITY / GAP: if the requested capability already exists in the code, set already_exists=true and existing_note=one line citing it. Code existing does NOT mean the problem is solved. Make the question probe the GAP - discoverability, correctness/validation, workflow fit, eligibility rules, or adoption (e.g. "X already exists in the code - is the issue that customers cannot find it, that it fails, or that it does not cover this case?"). working_problem = closing the specific gap in the existing feature. Do NOT tell the user to stop.\\n''
     || ''2) Infer current_workflow from the code; never ask the stakeholder how the system works.\\n''
-    || ''3) DATA: put at least one real figure from DATA SIGNALS into data_insight EVERY turn (never blank); weave a number into the question when natural; never invent numbers; state any DATA GAP; never mention returns/refunds unless the topic is returns/refunds/exchanges.\\n''
+    || ''3) DATA: data_insight MUST include at least one concrete figure from DATA SIGNALS EVERY turn (never blank, never invent numbers); weave a number into the question when natural; never mention returns/refunds unless the topic is returns/refunds/exchanges. When DATA SIGNALS also carries a "DATA GAP" note relevant to the request (e.g. cart abandonment, coupon usage, funnel drop-off the dataset does not capture), ALSO state that limitation in one clause (say the metric cannot be measured from the current data) while STILL keeping the concrete number - do not drop the number, and do not present unrelated counts as if they measured the missing metric.\\n''
     || ''4) Do not ask for counts/rates the data can answer; ask only goals, qualitative pain, priorities, constraints.\\n''
     || ''5) Score each of the 8 coverage dims 0-100 from transcript+code+data; confidence = rounded average; stop=true only if confidence>=78 or asked>=8.\\n''
     || ''6) Ask ONE new question on the lowest-covered dimension; never repeat or reword an answered question.\\n''

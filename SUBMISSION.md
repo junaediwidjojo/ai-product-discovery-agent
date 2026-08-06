@@ -72,7 +72,7 @@ flowchart TB
 **Data flow — how the pieces plug together:**
 1. **Ingest →** commerce data + code/docs/issues load into Snowflake; the knowledge graph feeds `KNOWLEDGE_SEARCH` (unstructured) and `COMMERCE_SV` (structured).
 2. **Seed →** `BUILD_OVERVIEW` and `BUILD_TAXONOMY` analyze the repo once (cached) to produce the product overview and focus topics.
-3. **Reason (per turn) →** `DISCOVERY_NEXT` orchestrates: it calls `RETRIEVE_EVIDENCE` (code-blended Cortex Search) and `DATA_SIGNALS` (topic-routed live metrics), combines them with the transcript, and returns coverage, confidence, the next question, a data insight, and an "already-exists" flag.
+3. **Reason (per turn) →** the app orchestrator calls `RETRIEVE_EVIDENCE` (code-blended Cortex Search) and passes the results into `DISCOVERY_NEXT`, which computes `DATA_SIGNALS` (topic-routed live metrics) **internally**, combines evidence + data + transcript, and returns coverage, confidence, the next question, a data insight, and an existing-capability flag. (`DISCOVERY_NEXT` does not call Cortex Search itself.)
 4. **Synthesize →** `DISCOVERY_ARTIFACTS` produces the business brief; PM approval gates the rest.
 5. **Act →** `SCORE_RICE` (discovery-aligned), `GENERATE_PRD` (13-section, data-grounded), `CREATE_TASKS` (Jira-ready tickets).
 
@@ -84,7 +84,7 @@ flowchart TB
 | `BUILD_TAXONOMY` | proc | Repo → 10 business focus areas (start-screen chips) |
 | `RETRIEVE_EVIDENCE` | proc | Cortex Search over code/docs/issues; returns content, blended to always include code |
 | `DATA_SIGNALS` | function | Topic-aware live commerce metrics; flags data gaps honestly |
-| `DISCOVERY_NEXT` | proc | Orchestrator: coverage + confidence + next question, grounded in code + data + transcript |
+| `DISCOVERY_NEXT` | proc | Reasoning step: coverage + confidence + next question; computes live metrics via `DATA_SIGNALS` internally and uses code/doc evidence passed in by the app orchestrator |
 | `DISCOVERY_ARTIFACTS` | proc | PM-ready business brief |
 | `SCORE_RICE` | proc | RICE with discovery-aligned confidence + Low/Med/High bands |
 | `GENERATE_PRD` | proc | Full 13-section, data-grounded PRD |
@@ -100,7 +100,7 @@ Every Snowflake object is versioned as reproducible DDL in [`sql/`](sql/) — `C
 
 **Measurable outcomes**
 - **Discovery cycle time (target):** aims to reduce discovery from an assumed baseline of **3–5 stakeholder/PM meetings** per idea to one facilitated self-serve session plus a PM review, producing a PM-ready brief + PRD + tickets. (Target, not yet validated with a pilot — see below.)
-- **Fewer wrong/duplicate builds:** every request is checked against the **actual codebase**; already-built features (e.g., the existing checkout promotion-code input) are flagged and hard-stopped before any spec is written.
+- **Fewer wrong/duplicate builds:** every request is checked against the **actual codebase**; already-built features (e.g., the existing checkout promotion-code input) are detected before planning, and Nomy investigates the specific gap (discoverability, correctness, workflow fit, eligibility, adoption) rather than auto-stopping — recommending no new build only when the stakeholder confirms the current capability fully covers the need.
 - **Decisions grounded in real data:** questions and prioritization cite live numbers (e.g., **1,200 orders, 527 not-completed (44%), 101 in `requires_action`, 144 returns**) instead of opinions; when data is missing (no cart/abandonment tables) it is flagged as a gap rather than guessed.
 - **Consistency:** every idea yields the same structured artifacts (8-dimension coverage, RICE with bands, 13-section PRD, estimated tickets), reducing brief-quality variance across PMs.
 
@@ -117,11 +117,15 @@ Every Snowflake object is versioned as reproducible DDL in [`sql/`](sql/) — `C
 ---
 
 ## Evaluation (reproducible)
-`python eval.py` runs a scenario matrix against the live skills and writes [`EVAL.md`](EVAL.md). Current result: **9/10 scenarios pass** — existing-capability detection, DATA-GAP honesty, topic-scoped numeric grounding, off-topic refund avoidance, contradiction handling (with no false positives), unsupported-metric abstention, and no-repeat questioning; 100% JSON/procedure success; data present on every turn. (The one miss: a frequency contradiction not flagged — a known limitation, reported honestly.)
+`python eval.py` runs **two layers** against the live Snowflake backend and writes [`EVAL.md`](EVAL.md):
+- **Controlled reasoning** — handcrafted evidence passed into `DISCOVERY_NEXT` to test a specific behavior deterministically (existing-capability detection, DATA-GAP honesty, off-topic avoidance, contradiction handling with no false positives, unsupported-metric abstention, options-are-answers, no-repeat questioning).
+- **End-to-end Snowflake pipeline** — a natural-language request → `RETRIEVE_EVIDENCE` (Cortex Search) → `DISCOVERY_NEXT` (live metrics via `DATA_SIGNALS`) → `DISCOVERY_ARTIFACTS` summary → artifact persistence, with **retrieval relevance** measured (an on-topic item must actually be retrieved; a non-empty result does not count).
+
+See [`EVAL.md`](EVAL.md) for the current dated run (scenario pass rate, retrieval relevance, JSON/procedure success, data-grounding, unsupported-metric abstention, median end-to-end latency). The evaluation contains **both controlled-evidence and true end-to-end retrieval scenarios**; any failing scenario (e.g., a frequency contradiction not flagged) is reported honestly rather than hidden.
 
 ## Honest disclosures
 - Real Medusa seed (orders/products/customers/prices); **return & refund events are synthesized** on the real orders (~12% return rate, real reason labels). This dev export does not include cart/checkout-session/promotion tables — the app surfaces that as a data gap rather than fabricating cart-abandonment numbers.
-- The Jira integration is a **clearly labeled demo** (tickets are generated and shown as they would appear on the board); production would push via the Jira REST API.
+- Engineering tickets are generated from the PRD and **persisted as Jira-ready tasks in Snowflake** (`DISCOVERY.TASK`, with type/area/priority/points). The Jira board interaction is a **clearly labeled demonstration** and does **not** call the real Jira REST API.
 
 ## Built with CoCo CLI
-Designed, built, and self-verified through Cortex Code (CoCo) — schema, data loading, the semantic view, the `KNOWLEDGE_SEARCH` service, all DISCOVERY skills, the native Cortex Agent, and the Streamlit app — using its skills (`semantic-view`, `search-optimization`, `cortex-agent`). A custom `product-discovery` CoCo skill encodes the workflow. Reproducible scripts: `load_medusa.py`, `gen_refunds.py`, `index_*.py`, `deploy_app.py`, plus the ordered DDL in `sql/` (`01..07`).
+Cortex Code (CoCo) was used to **build, orchestrate, and validate** the Snowflake resources — schema, data loading, the semantic view, the `KNOWLEDGE_SEARCH` service, all DISCOVERY skills, and the native Cortex Agent — using its skills (`semantic-view`, `search-optimization`, `cortex-agent`); a custom `product-discovery` CoCo skill encodes the workflow. At runtime the **Streamlit app is the orchestrator** that composes the SQL skills directly; the native `PRODUCT_DISCOVERY_AGENT` additionally exposes commerce Q&A and enterprise search as reusable tools. Reproducible scripts: `load_medusa.py`, `gen_refunds.py`, `index_*.py`, `deploy_app.py`, plus the ordered DDL in `sql/` (`01..07`).

@@ -129,10 +129,8 @@ def detect_topic(ask):
     return "order"
 
 def _search(query_text, limit, atype):
-    try:
-        data = _j(q("CALL PM_MEDIATOR.DISCOVERY.RETRIEVE_EVIDENCE(?, ?, ?)", [query_text, limit, atype])[0][0])
-    except Exception:
-        return []
+    # Let failures propagate so the orchestrator can surface a grounding error and offer retry.
+    data = _j(q("CALL PM_MEDIATOR.DISCOVERY.RETRIEVE_EVIDENCE(?, ?, ?)", [query_text, limit, atype])[0][0])
     out = []
     for r in (data.get("results") or []):
         cite = r.get("TITLE", "")
@@ -180,7 +178,10 @@ def transcript_str(idea, turns):
     return s
 
 def discovery_next(transcript, ev, asked):
-    return _j(q("CALL PM_MEDIATOR.DISCOVERY.DISCOVERY_NEXT(?,?,?)", [transcript, ev, asked])[0][0]) or {}
+    nxt = _j(q("CALL PM_MEDIATOR.DISCOVERY.DISCOVERY_NEXT(?,?,?)", [transcript, ev, asked])[0][0])
+    if not isinstance(nxt, dict) or not str(nxt.get("question", "")).strip():
+        raise ValueError("discovery_next returned a malformed response")
+    return nxt
 
 def conf_of(nxt):
     cov = (nxt or {}).get("coverage") or {}
@@ -188,7 +189,10 @@ def conf_of(nxt):
     return max(int((nxt or {}).get("confidence", 0) or 0), avg)
 
 def discovery_artifacts(transcript, ev):
-    return _j(q("CALL PM_MEDIATOR.DISCOVERY.DISCOVERY_ARTIFACTS(?,?)", [transcript, ev])[0][0]) or {}
+    a = _j(q("CALL PM_MEDIATOR.DISCOVERY.DISCOVERY_ARTIFACTS(?,?)", [transcript, ev])[0][0])
+    if not isinstance(a, dict) or not str(a.get("problem_statement", "")).strip():
+        raise ValueError("discovery_artifacts returned a malformed response")
+    return a
 
 def save_session(sid, idea, status, confidence):
     q("DELETE FROM PM_MEDIATOR.DISCOVERY.DISCOVERY_SESSION WHERE SESSION_ID=?", [sid])
@@ -298,9 +302,11 @@ def propose_feature(topic, ev):
     try:
         d = _j(q("CALL PM_MEDIATOR.DISCOVERY.PROPOSE_FEATURE(?,?,?)", [topic, "", ev])[0][0])
         if d:
+            st.session_state.feature_fallback = False
             return (d.get("title") or fb[0], d.get("desc") or fb[1], d.get("cta") or "Try it")
     except Exception:
         pass
+    st.session_state.feature_fallback = True  # optional feature: safe default, flagged to the user
     return fb
 
 def build_illustration(topic, feat, product, order, code_ref):
@@ -347,6 +353,8 @@ if "phase" not in st.session_state:
 
 def coverage_rail(ss):
     st.markdown("### Discovery progress")
+    if ss.get("persist_warn"):
+        st.caption("Saving to Snowflake is temporarily unavailable - this session stays in memory.")
     conf = int(ss.get("confidence", 0) or 0)
     st.metric("Discovery Confidence", f"{conf}%")
     st.progress(min(1.0, conf / 100.0))
@@ -358,6 +366,15 @@ def coverage_rail(ss):
 
 def evidence_panel(ss):
     ev = ss.get("evidence", [])
+    if ss.get("evidence_error"):
+        st.warning("Code/document grounding is temporarily unavailable. Discovery continues without it.")
+        if st.button("Retry grounding", key="retry_ev"):
+            try:
+                ss.evidence = retrieve_evidence((ss.get("idea", "") or "") + " " + " ".join(ss.get("focus") or []))
+                ss.evidence_error = False
+            except Exception:
+                ss.evidence_error = True
+            _rerun()
     groups = {"Code": [], "Documentation": [], "Issues / community": []}
     for e in ev:
         s = (e.get("source") or "").upper()
@@ -391,6 +408,7 @@ def data_panel(ss):
             sig = q("SELECT PM_MEDIATOR.DISCOVERY.DATA_SIGNALS(?)", [ctx])[0][0]
         except Exception:
             sig = ""
+            st.caption("Live metrics are temporarily unavailable.")
         st.markdown(hl_nums(sig) if sig else "-", unsafe_allow_html=True)
         st.caption("Computed live via SQL over PM_MEDIATOR.MOCK (modeled by the COMMERCE_SV semantic view). Skill: DATA_SIGNALS().")
 
@@ -402,17 +420,30 @@ def start_discovery(idea, focus=None):
     ss.turns = []
     ss.asked = 0
     ss.session_id = str(uuid.uuid4())[:12]
-    with st.spinner("Scanning enterprise knowledge for similar initiatives..."):
-        ss.evidence = retrieve_evidence((idea or "") + " " + " ".join(ss.focus))
-    with st.spinner("Preparing the discovery interview..."):
-        nxt = discovery_next(transcript_str(idea, ss.turns), evidence_str(ss.evidence), 0)
+    # Enterprise evidence (Cortex Search) - graceful degradation if it fails
+    try:
+        with st.spinner("Scanning enterprise knowledge for similar initiatives..."):
+            ss.evidence = retrieve_evidence((idea or "") + " " + " ".join(ss.focus))
+        ss.evidence_error = False
+    except Exception:
+        ss.evidence = []
+        ss.evidence_error = True
+    # Discovery kickoff (required) - do not advance to the interview if this fails
+    try:
+        with st.spinner("Preparing the discovery interview..."):
+            nxt = discovery_next(transcript_str(idea, ss.turns), evidence_str(ss.evidence), 0)
+    except Exception:
+        ss.start_error = True
+        return
     ss.next = nxt
     ss.coverage = nxt.get("coverage", {})
     ss.confidence = conf_of(nxt)
+    ss.persist_warn = False
     try:
         save_session(ss.session_id, idea, "in_discovery", ss.confidence)
-    except Exception as e:
-        st.warning(f"Persistence skipped: {e}")
+    except Exception:
+        ss.persist_warn = True
+    ss.start_error = False
     ss.phase = "interview"
 
 def submit_answer(answer):
@@ -423,20 +454,26 @@ def submit_answer(answer):
     try:
         save_turn(ss.session_id, ss.asked, question, answer)
     except Exception:
-        pass
+        ss.persist_warn = True
     ss.pending = True  # process on next render -> smoother transition
 
 def process_pending():
     ss = st.session_state
     tr = transcript_str(ss.idea, ss.turns)
-    nxt = discovery_next(tr, evidence_str(ss.evidence), ss.asked)
+    try:
+        nxt = discovery_next(tr, evidence_str(ss.evidence), ss.asked)
+    except Exception:
+        ss.next_error = True
+        ss.pending = False
+        return
     ss.next = nxt
+    ss.next_error = False
     ss.coverage = nxt.get("coverage", ss.coverage)
     ss.confidence = conf_of(nxt)
     try:
         save_session(ss.session_id, ss.idea, "in_discovery", ss.confidence)
     except Exception:
-        pass
+        ss.persist_warn = True
     ss.pending = False
     if nxt.get("stop") or ss.asked >= MAX_Q or int(ss.confidence or 0) >= CONF_THRESHOLD:
         build_summary()
@@ -444,17 +481,24 @@ def process_pending():
 def build_summary():
     ss = st.session_state
     tr = transcript_str(ss.idea, ss.turns)
-    with st.spinner("Synthesizing the discovery brief..."):
-        ss.artifacts = discovery_artifacts(tr, evidence_str(ss.evidence))
+    try:
+        with st.spinner("Synthesizing the discovery brief..."):
+            ss.artifacts = discovery_artifacts(tr, evidence_str(ss.evidence))
+    except Exception:
+        ss.summary_error = True
+        return
+    ss.summary_error = False
     try:
         ss.rice = score_rice(ss.topic, ss.get("confidence", 0))
+        ss.rice_error = False
     except Exception:
         ss.rice = None
+        ss.rice_error = True
     try:
         save_artifacts(ss.session_id, ss.artifacts)
         save_session(ss.session_id, ss.idea, "summarized", ss.confidence)
     except Exception:
-        pass
+        ss.persist_warn = True
     ss.phase = "summary"
 
 # ================= PHASE: IDEA =================
@@ -486,14 +530,16 @@ if st.session_state.phase == "idea":
         idea = st.text_input("Describe the business problem or idea to explore",
                              placeholder="e.g. Customers keep calling support to check where their order is", key="idea_box")
         go = st.form_submit_button("Start discovery", type="primary", disabled=ss.get("starting", False))
+    if ss.get("start_error"):
+        st.error("Couldn't start the discovery interview - the AI service didn't respond as expected. Please try again.")
     if go and idea and not ss.get("starting"):
         ss.starting = True
         ss.pending_idea = idea
+        ss.start_error = False
         _rerun()
     if ss.get("starting"):
         try:
-            with st.spinner("Starting discovery..."):
-                start_discovery(ss.get("pending_idea", ""), st.session_state.get("topic_pills") or [])
+            start_discovery(ss.get("pending_idea", ""), st.session_state.get("topic_pills") or [])
         finally:
             ss.starting = False
         _rerun()
@@ -516,42 +562,55 @@ elif st.session_state.phase == "interview":
                 process_pending()
             _rerun()
         else:
-            nxt = ss.get("next") or {}
-            if nxt.get("already_exists") and str(nxt.get("existing_note", "")).strip():
-                st.info("Existing capability detected in the code - " + str(nxt.get("existing_note", ""))
-                        + "  This doesn't mean the problem is solved; let's pinpoint the gap (discoverability, correctness, workflow fit, eligibility, or adoption).")
-                if st.button("It fully covers the need - end discovery", key="halt"):
-                    ss.halt_note = str(nxt.get("existing_note", ""))
-                    ss.phase = "halted"
+            if ss.get("next_error"):
+                st.error("Couldn't generate the next question - the AI service didn't respond as expected. Your answers are saved; please retry.")
+                if st.button("Retry next question"):
+                    ss.next_error = False
+                    ss.pending = True
                     _rerun()
-            adj = nxt.get("adjustment") or {}
-            if adj.get("needed") and str(adj.get("note", "")).strip():
-                st.info("Let's make sure we're aligned - " + str(adj.get("note", "")))
-            qn = nxt.get("question", "Tell me more about the problem.")
-            _di = nxt.get("data_insight")
-            if _di and str(_di).strip():
-                st.markdown(f"<div class='datacard'><span class='pill'>From your data</span> {hl_nums(_di)}</div>",
-                            unsafe_allow_html=True)
-            st.markdown(f"<div class='qcard'><div class='qtext'>{esc(qn)}</div>"
-                        f"<div class='why'>{esc(nxt.get('why',''))}</div></div>", unsafe_allow_html=True)
-            opts = (nxt.get("options") or [])
-            SENTINEL = "Type my own answer"
-            with st.form("answer_form", clear_on_submit=True):
-                picked = st.radio("Quick answer (optional):", opts + [SENTINEL], format_func=hl_md, key="pick") if opts else None
-                typed = st.text_input("Your answer", key="ans_box")
-                submitted = st.form_submit_button("Answer")
-                st.caption("- or, when you have shared enough -")
-                enough = st.form_submit_button("I have enough -> go to summary")
-            if submitted:
-                ans = (typed or "").strip()
-                if not ans and picked and picked != SENTINEL:
-                    ans = picked
-                if ans:
-                    submit_answer(ans)
+            elif ss.get("summary_error"):
+                st.error("Couldn't synthesize the discovery brief. Please retry.")
+                if st.button("Retry summary"):
+                    ss.summary_error = False
+                    build_summary()
                     _rerun()
-            if enough:
-                build_summary()
-                _rerun()
+            else:
+                nxt = ss.get("next") or {}
+                if nxt.get("already_exists") and str(nxt.get("existing_note", "")).strip():
+                    st.info("Existing capability detected in the code - " + str(nxt.get("existing_note", ""))
+                            + "  This doesn't mean the problem is solved; let's pinpoint the gap (discoverability, correctness, workflow fit, eligibility, or adoption).")
+                    if st.button("It fully covers the need - end discovery", key="halt"):
+                        ss.halt_note = str(nxt.get("existing_note", ""))
+                        ss.phase = "halted"
+                        _rerun()
+                adj = nxt.get("adjustment") or {}
+                if adj.get("needed") and str(adj.get("note", "")).strip():
+                    st.info("Let's make sure we're aligned - " + str(adj.get("note", "")))
+                qn = nxt.get("question", "Tell me more about the problem.")
+                _di = nxt.get("data_insight")
+                if _di and str(_di).strip():
+                    st.markdown(f"<div class='datacard'><span class='pill'>From your data</span> {hl_nums(_di)}</div>",
+                                unsafe_allow_html=True)
+                st.markdown(f"<div class='qcard'><div class='qtext'>{esc(qn)}</div>"
+                            f"<div class='why'>{esc(nxt.get('why',''))}</div></div>", unsafe_allow_html=True)
+                opts = (nxt.get("options") or [])
+                SENTINEL = "Type my own answer"
+                with st.form("answer_form", clear_on_submit=True):
+                    picked = st.radio("Quick answer (optional):", opts + [SENTINEL], format_func=hl_md, key="pick") if opts else None
+                    typed = st.text_input("Your answer", key="ans_box")
+                    submitted = st.form_submit_button("Answer")
+                    st.caption("- or, when you have shared enough -")
+                    enough = st.form_submit_button("I have enough -> go to summary")
+                if submitted:
+                    ans = (typed or "").strip()
+                    if not ans and picked and picked != SENTINEL:
+                        ans = picked
+                    if ans:
+                        submit_answer(ans)
+                        _rerun()
+                if enough:
+                    build_summary()
+                    _rerun()
 
         # --- context + conversation history BELOW the active question (newest first) ---
         st.markdown("---")
@@ -647,7 +706,7 @@ elif st.session_state.phase == "pm_review":
         try:
             save_session(ss.session_id, ss.idea, "pm_approved", ss.confidence)
         except Exception:
-            pass
+            ss.persist_warn = True
         ss.phase = "approved"
         _rerun()
     if c2.button("Send back to discovery"):
@@ -664,9 +723,13 @@ elif st.session_state.phase == "approved":
     st.subheader("RICE score")
     if not ss.get("rice"):
         if st.button("Compute RICE"):
-            with st.spinner("Scoring..."):
-                ss.rice = score_rice(ss.topic, ss.get("confidence", 0))
-            _rerun()
+            try:
+                with st.spinner("Scoring..."):
+                    ss.rice = score_rice(ss.topic, ss.get("confidence", 0))
+            except Exception:
+                st.error("RICE scoring failed. Please retry.")
+            else:
+                _rerun()
     else:
         render_rice(ss.rice)
 
@@ -674,13 +737,19 @@ elif st.session_state.phase == "approved":
     if "mockup" not in ss:
         st.caption("Generate an existing-vs-proposed mock of the affected screen, grounded in the code.")
         if st.button("Generate interface illustration"):
-            code_ref = next((e["citation"] for e in ss.get("evidence", []) if "CODE" in (e.get("source") or "")), "")
-            with st.spinner("Rendering illustration..."):
-                feat = propose_feature(ss.topic, evidence_str(ss.get("evidence", [])))
-                ss.mockup = build_illustration(ss.topic, feat, get_product(), get_sample_order(), code_ref)
-            _rerun()
+            try:
+                code_ref = next((e["citation"] for e in ss.get("evidence", []) if "CODE" in (e.get("source") or "")), "")
+                with st.spinner("Rendering illustration..."):
+                    feat = propose_feature(ss.topic, evidence_str(ss.get("evidence", [])))
+                    ss.mockup = build_illustration(ss.topic, feat, get_product(), get_sample_order(), code_ref)
+            except Exception:
+                st.warning("Couldn't render the illustration. This step is optional - you can skip it.")
+            else:
+                _rerun()
     else:
         components.html(ss.mockup, height=460, scrolling=True)
+        if ss.get("feature_fallback"):
+            st.caption("Note: used a default feature template (the live AI proposal was unavailable).")
 
     st.subheader("PRD")
 
@@ -693,32 +762,56 @@ elif st.session_state.phase == "approved":
 
     if "prd" not in ss:
         if st.button("Generate PRD"):
-            with st.spinner("Generating grounded PRD..."):
-                ss.prd = generate_prd(ss.session_id, ss.idea, prd_ctx())
-            _rerun()
+            try:
+                with st.spinner("Generating grounded PRD..."):
+                    prd = generate_prd(ss.session_id, ss.idea, prd_ctx())
+                if not prd or not str(prd).strip():
+                    raise ValueError("empty PRD")
+                ss.prd = prd
+            except Exception:
+                st.error("PRD generation failed. Please retry.")
+            else:
+                _rerun()
     else:
         with st.expander("View PRD", expanded=True):
             st.markdown(ss.prd)
         pc1, pc2 = st.columns(2)
         pc1.download_button("Download PRD (.md)", ss.prd or "", file_name="PRD.md", mime="text/markdown")
         if pc2.button("Regenerate PRD"):
-            with st.spinner("Regenerating PRD..."):
-                ss.prd = generate_prd(ss.session_id, ss.idea, prd_ctx())
-            for k in ("ntasks", "jira_pushed"):
-                if k in ss:
-                    del ss[k]
-            _rerun()
+            try:
+                with st.spinner("Regenerating PRD..."):
+                    prd = generate_prd(ss.session_id, ss.idea, prd_ctx())
+                if not prd or not str(prd).strip():
+                    raise ValueError("empty PRD")
+                ss.prd = prd
+            except Exception:
+                st.error("PRD regeneration failed. Please retry.")
+            else:
+                for k in ("ntasks", "jira_pushed"):
+                    if k in ss:
+                        del ss[k]
+                _rerun()
         st.subheader("Engineering tickets -> Jira")
         st.caption("Demo integration: in production these tickets are pushed to Jira via its REST API. "
                    "Here they are generated from the PRD and shown as they would appear on the board.")
         if "ntasks" not in ss:
             if st.button("Generate tickets from PRD"):
-                with st.spinner("Breaking the PRD into tickets..."):
-                    ss.ntasks = create_tasks(ss.session_id, ss.prd)
-                _rerun()
+                try:
+                    with st.spinner("Breaking the PRD into tickets..."):
+                        ss.ntasks = create_tasks(ss.session_id, ss.prd)
+                except Exception:
+                    st.error("Ticket generation failed. Please retry.")
+                else:
+                    _rerun()
         else:
-            tasks = q("SELECT TASK_KEY,TYPE,AREA,PRIORITY,ESTIMATE,TITLE,DESCRIPTION,STATUS "
-                      "FROM PM_MEDIATOR.DISCOVERY.TASK WHERE SESSION_ID=? ORDER BY TASK_KEY", [ss.session_id])
+            try:
+                tasks = q("SELECT TASK_KEY,TYPE,AREA,PRIORITY,ESTIMATE,TITLE,DESCRIPTION,STATUS "
+                          "FROM PM_MEDIATOR.DISCOVERY.TASK WHERE SESSION_ID=? ORDER BY TASK_KEY", [ss.session_id])
+            except Exception:
+                st.error("Couldn't load the saved tickets from Snowflake. Please retry.")
+                tasks = []
+                if st.button("Retry loading tickets"):
+                    _rerun()
             tc1, tc2 = st.columns(2)
             if not ss.get("jira_pushed"):
                 if tc1.button(f"Create {len(tasks)} tickets in Jira (demo)", type="primary"):
@@ -727,11 +820,15 @@ elif st.session_state.phase == "approved":
             else:
                 tc1.success(f"Created {len(tasks)} tickets on board NOMY (demo).")
             if tc2.button("Regenerate tickets"):
-                with st.spinner("Regenerating tickets..."):
-                    ss.ntasks = create_tasks(ss.session_id, ss.prd)
-                if "jira_pushed" in ss:
-                    del ss["jira_pushed"]
-                _rerun()
+                try:
+                    with st.spinner("Regenerating tickets..."):
+                        ss.ntasks = create_tasks(ss.session_id, ss.prd)
+                except Exception:
+                    st.error("Ticket regeneration failed. Please retry.")
+                else:
+                    if "jira_pushed" in ss:
+                        del ss["jira_pushed"]
+                    _rerun()
             for t in tasks:
                 st.markdown(render_jira(t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]),
                             unsafe_allow_html=True)
