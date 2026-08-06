@@ -63,8 +63,10 @@ def main():
         account=os.environ["SNOWFLAKE_ACCOUNT"], user=os.environ["SNOWFLAKE_USER"], role=os.environ.get("SNOWFLAKE_ROLE", "ACCOUNTADMIN"),
         private_key_file=os.environ.get("SNOWFLAKE_PRIVATE_KEY_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".keys", "rsa_key.p8")))
     cur = con.cursor()
+    # Warehouse config is canonicalized in sql/00_warehouse.sql (AUTO_SUSPEND kept long
+    # enough to stay warm through a demo). Keep this value in sync with that file.
     cur.execute(f"CREATE WAREHOUSE IF NOT EXISTS {WH} WAREHOUSE_SIZE=XSMALL "
-                "AUTO_SUSPEND=60 AUTO_RESUME=TRUE INITIALLY_SUSPENDED=TRUE")
+                "AUTO_SUSPEND=600 AUTO_RESUME=TRUE INITIALLY_SUSPENDED=TRUE")
     cur.execute(f"USE WAREHOUSE {WH}")
     cur.execute(f"CREATE DATABASE IF NOT EXISTS {DB}")
     cur.execute(f"CREATE SCHEMA IF NOT EXISTS {DB}.{SCHEMA}")

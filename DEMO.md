@@ -29,7 +29,7 @@ Snowflake CoCo CLI Hackathon · Category: AI-Native Data Application
 - **Honest data gaps:** a checkout-abandonment question → Nomy states the dataset has no cart/abandonment tables rather than inventing a number.
 
 ## Reliability tips (for the recording)
-- Do one full dry run first so the warehouse is warm and the SiS package cache is built (avoids a slow first load). `AUTO_SUSPEND` is 300s so mid-demo pauses won't cold-start.
+- Run `python warmup.py` ~1 min before recording to warm the warehouse + prime caches. `AUTO_SUSPEND` is 600s so mid-demo pauses won't cold-start. Note: the first cold call can still be slower than warm calls.
 - Have the 3 answers ready (use the quick-answer chips); stop at 3 questions via "I have enough".
 - **Record with a backup**: keep a screen recording of a known-good run in case a live Cortex call is slow during the session.
 

@@ -82,6 +82,50 @@ def evidence_str(ev):
 def call_next(transcript, ev, asked):
     return call_json("CALL PM_MEDIATOR.DISCOVERY.DISCOVERY_NEXT(?,?,?)", [transcript, ev, asked])
 
+# ---- optimized app path (adaptive search, compact state, precomputed signal, V2) ----
+def adaptive_retrieve(query):
+    """One general search first; only run the filtered code search if no code result is present."""
+    gen = _search(query, 6, "")
+    has_code = any("CODE" in (e.get("source") or "") for e in gen)
+    pool = gen if has_code else (_search(query, 3, "code_file") + gen)
+    merged, seen = [], set()
+    for e in pool:
+        k = (e["source"], e["citation"])
+        if k in seen:
+            continue
+        seen.add(k); merged.append(e)
+        if len(merged) >= 6:
+            break
+    return merged
+
+def data_signals(text):
+    return cur.execute("SELECT PM_MEDIATOR.DISCOVERY.DATA_SIGNALS(?)", [text]).fetchone()[0]
+
+def build_state(idea, focus, turns, prev):
+    """Compact structured discovery state sent to DISCOVERY_NEXT_V2 (not the full raw transcript)."""
+    prev = prev or {}
+    st = {
+        "idea": idea,
+        "focus": focus or [],
+        "working_problem": prev.get("working_problem", ""),
+        "last_answer": turns[-1]["a"] if turns else "",
+        "answers": [{"q": (t["q"] or "")[:70], "a": (t["a"] or "")[:120]} for t in turns[-4:]],
+        "prev_coverage": prev.get("coverage", {}),
+        "asked": [(t["q"] or "")[:70] for t in turns],
+    }
+    return json.dumps(st, ensure_ascii=False)[:1200]
+
+def call_next_v2(state, ev, signal, asked):
+    return call_json("CALL PM_MEDIATOR.DISCOVERY.DISCOVERY_NEXT_V2(?,?,?,?)", [state, ev, signal, asked])
+
+def save_turn(sid, seq, q, a, status, conf, idea):
+    cur.execute("CALL PM_MEDIATOR.DISCOVERY.SAVE_DISCOVERY_TURN(?,?,?,?,?,?,?)",
+                [sid, seq, q, a, status, str(conf), idea])
+
+def save_artifacts_bulk(sid, arts):
+    cur.execute("CALL PM_MEDIATOR.DISCOVERY.SAVE_DISCOVERY_ARTIFACTS(?, PARSE_JSON(?))",
+                [sid, json.dumps(arts or {})])
+
 def call_artifacts(transcript, ev):
     return call_json("CALL PM_MEDIATOR.DISCOVERY.DISCOVERY_ARTIFACTS(?,?)", [transcript, ev])
 
@@ -161,6 +205,16 @@ CONTROLLED = [
      "[CODE_FILE] modules/order :: order status shown on order detail.",
      lambda n: (n.get("question", "") or "").strip().lower() != "what is the primary business goal?",
      "Do not repeat an answered question"),
+    ("contradiction_scope",
+     "Idea: personalized pricing. AI: who is this for? Stakeholder: All customers. AI: which segment? Stakeholder: Actually just one enterprise customer.", "",
+     lambda n: (n.get("adjustment") or {}).get("needed") is True, "Flag all-customers vs one-customer contradiction"),
+    ("contradiction_process",
+     "Idea: speed up refunds. AI: is it automated? Stakeholder: Fully automated, no manual steps. AI: who approves? Stakeholder: Every refund is manually approved by finance.", "",
+     lambda n: (n.get("adjustment") or {}).get("needed") is True, "Flag automated vs manually-approved contradiction"),
+    ("consistent_no_flag",
+     "Idea: speed up refunds. AI: current process? Stakeholder: We approve refunds manually today and want to automate it. AI: goal? Stakeholder: cut refund turnaround time.",
+     "[CODE_FILE] modules/refund :: manual admin flow.",
+     lambda n: (n.get("adjustment") or {}).get("needed") is False, "No false contradiction on a manual->automate goal"),
 ]
 
 # ============================ END-TO-END PIPELINE ============================
@@ -171,21 +225,21 @@ E2E = [
      "focus": ["Returns & Refunds", "Order Journey"],
      "relevance_terms": ["return", "order", "help", "contact", "refund", "exchange"],
      "insight": lambda di: bool(re.search(r"return|refund|exchange", di.lower())) and has_number(di),
-     "extra": lambda n: True,
+     "extra": lambda n: True, "needs_code": True,
      "desc": "Retrieve order-help/returns evidence + return-specific live metrics"},
     {"name": "e2e_existing_promo",
      "request": "Add a coupon or voucher code field to checkout so customers can apply discounts.",
      "focus": ["Checkout & Payment"],
      "relevance_terms": ["promo", "discount", "coupon", "voucher", "code"],
      "insight": lambda di: has_number(di),
-     "extra": lambda n: (n.get("already_exists") is True) and (n.get("stop") is not True),
+     "extra": lambda n: (n.get("already_exists") is True) and (n.get("stop") is not True), "needs_code": True,
      "desc": "Surface existing promotion capability; already_exists=true, investigate the gap (no auto-stop)"},
     {"name": "e2e_cart_abandonment",
      "request": "Reduce cart abandonment during checkout.",
      "focus": ["Checkout & Payment"],
      "relevance_terms": ["checkout", "cart", "payment", "abandon"],
      "insight": lambda di: bool(re.search(r"gap|cannot be measured|can't be measured|not (captured|available|tracked)|does not capture|do(es)? not (capture|have)|no cart|not in the (current )?data", di.lower())),
-     "extra": lambda n: True,
+     "extra": lambda n: True, "needs_code": False,
      "desc": "Report that cart/abandonment data is unavailable instead of inventing a metric"},
 ]
 
@@ -215,34 +269,51 @@ def run_e2e():
     rows, lat = [], []
     for sc in E2E:
         name = sc["name"]; t = time.time()
-        rel_ct = 0; json_ok = insight_ok = extra_ok = opts_ok = summary_ok = persist_ok = False
+        rel_ct = code_ct = 0
+        json_ok = insight_ok = extra_ok = opts_ok = summary_ok = persist_ok = code_ok = False
+        sid = "evaltest-" + name
         try:
-            ev = retrieve_evidence(sc["request"] + " " + " ".join(sc.get("focus") or []))
+            q = sc["request"] + " " + " ".join(sc.get("focus") or [])
+            ev = adaptive_retrieve(q)                       # S3: one search, code search only if needed
             terms = sc["relevance_terms"]
             rel_ct = sum(1 for e in ev if any(term in (e["citation"] + " " + e["content"]).lower() for term in terms))
+            code_ct = sum(1 for e in ev if "CODE" in (e.get("source") or ""))
             evstr = evidence_str(ev)
-            tr = transcript(sc["request"], sc.get("focus"))
-            nxt = call_next(tr, evstr, 0)
+            sig = data_signals(q)                            # S2: computed ONCE, reused below
+            nxt = call_next_v2(build_state(sc["request"], sc.get("focus"), [], {}), evstr, sig, 0)
             json_ok = isinstance(nxt, dict) and bool(nxt.get("question"))
             di = str(nxt.get("data_insight", "") or "")
             insight_ok = bool(di.strip()) and bool(sc["insight"](di))
             extra_ok = bool(sc["extra"](nxt))
             opts_ok = options_are_answers(nxt)
-            # simulate a one-turn interview so the summary has something to synthesize
+            code_ok = (not sc.get("needs_code")) or code_ct >= 1
+            # one simulated turn, persisted via the batched procs (S4)
             ans = (nxt.get("options") or ["Please proceed."])[0]
-            tr2 = tr + "AI: " + str(nxt.get("question", "")) + "\nStakeholder: " + str(ans) + "\n"
+            save_turn(sid, 0, "", "", "in_discovery", "10", sc["request"])
+            save_turn(sid, 1, str(nxt.get("question", "")), str(ans), "in_discovery", "40", sc["request"])
+            tr2 = transcript(sc["request"], sc.get("focus")) + "AI: " + str(nxt.get("question", "")) + "\nStakeholder: " + str(ans) + "\n"
             arts = call_artifacts(tr2, evstr)
             summary_ok = isinstance(arts, dict) and bool(str(arts.get("problem_statement", "")).strip())
-            persist_ok = persist_check("evaltest-" + name, arts if isinstance(arts, dict) else {})
+            save_artifacts_bulk(sid, arts if isinstance(arts, dict) else {})
+            acnt = cur.execute("SELECT COUNT(*) FROM PM_MEDIATOR.DISCOVERY.DISCOVERY_ARTIFACT WHERE SESSION_ID=?", [sid]).fetchone()[0]
+            scnt = cur.execute("SELECT COUNT(*) FROM PM_MEDIATOR.DISCOVERY.DISCOVERY_SESSION WHERE SESSION_ID=?", [sid]).fetchone()[0]
+            persist_ok = int(acnt or 0) > 0 and int(scnt or 0) > 0
         except Exception:
             pass
+        finally:
+            try:
+                cur.execute("DELETE FROM PM_MEDIATOR.DISCOVERY.DISCOVERY_ARTIFACT WHERE SESSION_ID=?", [sid])
+                cur.execute("DELETE FROM PM_MEDIATOR.DISCOVERY.DISCOVERY_TURN WHERE SESSION_ID=?", [sid])
+                cur.execute("DELETE FROM PM_MEDIATOR.DISCOVERY.DISCOVERY_SESSION WHERE SESSION_ID=?", [sid])
+            except Exception:
+                pass
         secs = round(time.time() - t, 1); lat.append(secs)
         rel_ok = rel_ct >= 1
-        passed = json_ok and rel_ok and insight_ok and extra_ok and opts_ok and summary_ok and persist_ok
+        passed = json_ok and rel_ok and insight_ok and extra_ok and opts_ok and summary_ok and persist_ok and code_ok
         rows.append({"name": name, "desc": sc["desc"], "passed": passed, "rel": rel_ok, "rel_ct": rel_ct,
                      "json": json_ok, "insight": insight_ok, "extra": extra_ok, "opts": opts_ok,
                      "summary": summary_ok, "persist": persist_ok, "secs": secs})
-        print(f"[e2e]        {'PASS' if passed else 'FAIL'}  {name:24s} {secs:5.1f}s  rel={rel_ct} "
+        print(f"[e2e]        {'PASS' if passed else 'FAIL'}  {name:24s} {secs:5.1f}s  rel={rel_ct} code={code_ct} "
               f"json={json_ok} insight={insight_ok} extra={extra_ok} summary={summary_ok} persist={persist_ok}")
     return rows, lat
 

@@ -18,6 +18,7 @@ create or replace TABLE PM_MEDIATOR.DISCOVERY.DISCOVERY_SESSION (
 	CONFIDENCE VARCHAR(16777216),
 	CLARIFYING_QUESTION VARCHAR(16777216),
 	CLARIFYING_ANSWER VARCHAR(16777216),
+	UPDATED_AT TIMESTAMP_TZ(9),
 	primary key (SESSION_ID)
 );
 create or replace TABLE PM_MEDIATOR.DISCOVERY.DISCOVERY_TURN (
@@ -156,6 +157,24 @@ BEGIN
   cleaned := REGEXP_SUBSTR(:raw, ''\\\\{.*\\\\}'', 1, 1, ''s'');
   RETURN TRY_PARSE_JSON(:cleaned);
 END';
+CREATE OR REPLACE FUNCTION PM_MEDIATOR.DISCOVERY.CONTRADICTION_HINT("P_TEXT" VARCHAR)
+RETURNS VARCHAR
+LANGUAGE SQL
+AS '
+  CASE
+    WHEN REGEXP_REPLACE(LOWER(COALESCE(P_TEXT,'''')),''[[:space:]]+'','' '') RLIKE ''.*(daily|every day|multiple times a day|several times a day|hourly).*''
+     AND REGEXP_REPLACE(LOWER(COALESCE(P_TEXT,'''')),''[[:space:]]+'','' '') RLIKE ''.*(fewer than|less than|only a few|a handful|once a month|a few times a month|a few per month|per month|monthly|rarely|seldom).*''
+      THEN ''Frequency mismatch: one answer implies high frequency (e.g. daily) while another implies low frequency (e.g. a few per month). Which is accurate?''
+    WHEN REGEXP_REPLACE(LOWER(COALESCE(P_TEXT,'''')),''[[:space:]]+'','' '') RLIKE ''.*(all customers|every customer|all users|everyone).*''
+     AND REGEXP_REPLACE(LOWER(COALESCE(P_TEXT,'''')),''[[:space:]]+'','' '') RLIKE ''.*(just one|only one|a single|one specific|one enterprise|a specific|single) (customer|client|account|user|enterprise).*''
+      THEN ''Scope mismatch: one answer said all customers while another pointed to a single/specific customer. Is this for everyone or one segment?''
+    WHEN REGEXP_REPLACE(LOWER(COALESCE(P_TEXT,'''')),''[[:space:]]+'','' '') RLIKE ''.*(fully automated|fully automatic|no manual|zero touch|completely automated).*''
+     AND REGEXP_REPLACE(LOWER(COALESCE(P_TEXT,'''')),''[[:space:]]+'','' '') RLIKE ''.*(manually approved|manual approval|approved by hand|approved manually|manually by|approve.{0,15}manually).*''
+     AND NOT REGEXP_REPLACE(LOWER(COALESCE(P_TEXT,'''')),''[[:space:]]+'','' '') RLIKE ''.*(from manual|instead of manual|replace manual|rather than manual|move to|migrate to|transition to|want to automate|plan to automate|currently manual|today.{0,25}manual).*''
+      THEN ''Process mismatch: one answer said fully automated while another said manually approved. Which is the target state?''
+    ELSE ''''
+  END
+';
 CREATE OR REPLACE PROCEDURE PM_MEDIATOR.DISCOVERY.CREATE_TASKS("P_SESSION" VARCHAR, "P_PRD" VARCHAR)
 RETURNS NUMBER(38,0)
 LANGUAGE SQL
@@ -248,31 +267,69 @@ RETURNS VARIANT
 LANGUAGE SQL
 EXECUTE AS OWNER
 AS '
-DECLARE raw STRING; cleaned STRING; prompt STRING; sig STRING;
+DECLARE raw STRING; cleaned STRING; prompt STRING; sig STRING; mdl STRING; hint STRING; res VARIANT;
 BEGIN
+  mdl := (SELECT PM_MEDIATOR.DISCOVERY.MODEL());
   sig := ''n/a'';
   BEGIN sig := (SELECT PM_MEDIATOR.DISCOVERY.DATA_SIGNALS(:P_TRANSCRIPT)); EXCEPTION WHEN OTHER THEN sig := ''n/a''; END;
+  hint := (SELECT PM_MEDIATOR.DISCOVERY.CONTRADICTION_HINT(:P_TRANSCRIPT));
   prompt := ''You are a Senior PM running product discovery. Understand the real PROBLEM (goal, users, current workflow, frequency, success metrics, constraints, assumptions, alternatives); do not take the request at face value.\\n''
     || ''TRANSCRIPT:\\n'' || :P_TRANSCRIPT || ''\\n''
     || ''CODE/DOCS (real, cited):\\n'' || :P_EVIDENCE || ''\\n''
     || ''DATA SIGNALS (real, topic-scoped, never empty):\\n'' || :sig || ''\\n''
-    || ''Questions asked: '' || TO_VARCHAR(:P_ASKED) || ''.\\n''
+    || ''Questions asked: '' || TO_VARCHAR(:P_ASKED) || (CASE WHEN :hint <> '''' THEN ''\\nCONTRADICTION DETECTED: '' || :hint ELSE '''' END) || ''.\\n''
     || ''RULES:\\n''
-    || ''1) EXISTING-CAPABILITY / GAP: if the requested capability already exists in the code, set already_exists=true and existing_note=one line citing it. Code existing does NOT mean the problem is solved. Make the question probe the GAP - discoverability, correctness/validation, workflow fit, eligibility rules, or adoption (e.g. "X already exists in the code - is the issue that customers cannot find it, that it fails, or that it does not cover this case?"). working_problem = closing the specific gap in the existing feature. Do NOT tell the user to stop.\\n''
+    || ''1) EXISTING-CAPABILITY / GAP: if the requested capability already exists in the code, set already_exists=true and existing_note=one line citing it. Code existing does NOT mean the problem is solved. Make the question probe the GAP - discoverability, correctness/validation, workflow fit, eligibility rules, or adoption. working_problem = closing the specific gap. Do NOT tell the user to stop.\\n''
     || ''2) Infer current_workflow from the code; never ask the stakeholder how the system works.\\n''
-    || ''3) DATA: data_insight MUST include at least one concrete figure from DATA SIGNALS EVERY turn (never blank, never invent numbers); weave a number into the question when natural; never mention returns/refunds unless the topic is returns/refunds/exchanges. When DATA SIGNALS also carries a "DATA GAP" note relevant to the request (e.g. cart abandonment, coupon usage, funnel drop-off the dataset does not capture), ALSO state that limitation in one clause (say the metric cannot be measured from the current data) while STILL keeping the concrete number - do not drop the number, and do not present unrelated counts as if they measured the missing metric.\\n''
+    || ''3) DATA: data_insight MUST include at least one concrete figure from DATA SIGNALS EVERY turn (never blank, never invent numbers); weave a number into the question when natural; never mention returns/refunds unless the topic is returns/refunds/exchanges. When DATA SIGNALS carries a relevant "DATA GAP", ALSO state plainly that the metric cannot be measured from current data while STILL keeping a concrete number.\\n''
     || ''4) Do not ask for counts/rates the data can answer; ask only goals, qualitative pain, priorities, constraints.\\n''
     || ''5) Score each of the 8 coverage dims 0-100 from transcript+code+data; confidence = rounded average; stop=true only if confidence>=78 or asked>=8.\\n''
     || ''6) Ask ONE new question on the lowest-covered dimension; never repeat or reword an answered question.\\n''
     || ''7) Accept a proposed spec without judgement; steer toward the underlying problem.\\n''
-    || ''8) adjustment.needed=true ONLY for a genuine contradiction (put it in note, gently ask to reconcile); else false with empty note/reframe.\\n''
+    || ''8) adjustment.needed=true ONLY for a genuine contradiction (if CONTRADICTION DETECTED above, set it true and reconcile in the note); else false with empty note/reframe.\\n''
     || ''9) options = 2-4 short declarative ANSWERS to your question (not questions; none end with "?" or start with What/How/Why/When/Who); distinct; cite a data figure where relevant.\\n''
     || ''Reply ONLY compact JSON, no prose or fences: ''
     || ''{"coverage":{"business_goal":0,"stakeholders":0,"current_workflow":0,"frequency":0,"success_metrics":0,"constraints":0,"assumptions":0,"alternatives":0},''
     || ''"confidence":0,"stop":false,"already_exists":false,"existing_note":"","working_problem":"...","data_insight":"...","adjustment":{"needed":false,"note":"","reframe":""},"question":"...","why":"...","options":["..."],"detected":[]}'';
-  raw := (SELECT AI_COMPLETE(''mistral-large2'', :prompt));
+  raw := (SELECT AI_COMPLETE(:mdl, :prompt));
   cleaned := REGEXP_SUBSTR(:raw, ''\\\\{.*\\\\}'', 1, 1, ''s'');
-  RETURN TRY_PARSE_JSON(:cleaned);
+  res := TRY_PARSE_JSON(:cleaned);
+  IF (:hint <> '''' AND res IS NOT NULL) THEN
+    res := OBJECT_INSERT(res, ''adjustment'', OBJECT_CONSTRUCT(''needed'', TRUE, ''note'', :hint, ''reframe'', ''''), TRUE);
+  END IF;
+  RETURN res;
+END;
+';
+CREATE OR REPLACE PROCEDURE PM_MEDIATOR.DISCOVERY.DISCOVERY_NEXT_V2("P_STATE" VARCHAR, "P_EVIDENCE" VARCHAR, "P_SIGNAL" VARCHAR, "P_ASKED" NUMBER(38,0))
+RETURNS VARIANT
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS '
+DECLARE raw STRING; cleaned STRING; prompt STRING; mdl STRING; hint STRING; res VARIANT;
+BEGIN
+  mdl := (SELECT PM_MEDIATOR.DISCOVERY.MODEL());
+  hint := (SELECT PM_MEDIATOR.DISCOVERY.CONTRADICTION_HINT(:P_STATE));
+  prompt := ''You are a Senior PM running product discovery. Reply ONLY compact JSON, no prose or fences.\\n''
+    || ''STATE (idea, focus, working problem, latest answer, established facts by dimension, prior coverage, questions already asked):\\n'' || :P_STATE || ''\\n''
+    || ''CODE/DOCS EVIDENCE (real, cited - use for current workflow; never ask how the system works):\\n'' || :P_EVIDENCE || ''\\n''
+    || ''LIVE DATA (real, topic-scoped; may include a DATA GAP):\\n'' || :P_SIGNAL || ''\\n''
+    || ''asked='' || TO_VARCHAR(:P_ASKED) || (CASE WHEN :hint <> '''' THEN ''\\nCONTRADICTION DETECTED: '' || :hint ELSE '''' END) || ''\\n''
+    || ''RULES: ''
+    || ''(1) Investigate the underlying problem, not the literal request. ''
+    || ''(2) data_insight MUST include a concrete figure from LIVE DATA; if a relevant DATA GAP is present, also state plainly that the metric cannot be measured from current data (still keep a real number); never invent numbers; mention returns/refunds only if the topic is returns/refunds/exchanges. ''
+    || ''(3) If the capability already exists in the code, set already_exists=true and existing_note citing it, and make the question probe the remaining GAP (discoverability, correctness, workflow fit, eligibility, adoption); never tell the user to stop. ''
+    || ''(4) Ask exactly ONE new question on the lowest-covered dimension; never repeat a question already asked in STATE. ''
+    || ''(5) options = 2-4 short declarative ANSWERS (not questions; none end with "?" or start with What/How/Why/When/Who). ''
+    || ''(6) Score all 8 coverage dimensions 0-100; confidence = rounded average; stop=true only if confidence>=78 or asked>=8. ''
+    || ''(7) adjustment.needed=true ONLY for a genuine contradiction (if CONTRADICTION DETECTED above, set it true and reconcile in the note); otherwise false with empty note. ''
+    || ''JSON schema: {"coverage":{"business_goal":0,"stakeholders":0,"current_workflow":0,"frequency":0,"success_metrics":0,"constraints":0,"assumptions":0,"alternatives":0},"confidence":0,"stop":false,"already_exists":false,"existing_note":"","working_problem":"...","data_insight":"...","adjustment":{"needed":false,"note":"","reframe":""},"question":"...","why":"...","options":["..."],"detected":[]}'';
+  raw := (SELECT AI_COMPLETE(:mdl, :prompt));
+  cleaned := REGEXP_SUBSTR(:raw, ''\\\\{.*\\\\}'', 1, 1, ''s'');
+  res := TRY_PARSE_JSON(:cleaned);
+  IF (:hint <> '''' AND res IS NOT NULL) THEN
+    res := OBJECT_INSERT(res, ''adjustment'', OBJECT_CONSTRUCT(''needed'', TRUE, ''note'', :hint, ''reframe'', ''''), TRUE);
+  END IF;
+  RETURN res;
 END;
 ';
 CREATE OR REPLACE PROCEDURE PM_MEDIATOR.DISCOVERY.GENERATE_PRD("P_SESSION" VARCHAR, "P_TOPIC" VARCHAR, "P_EVIDENCE" VARCHAR)
@@ -307,6 +364,10 @@ BEGIN
   html := (SELECT AI_COMPLETE(''mistral-large2'', :prompt));
   RETURN :html;
 END';
+CREATE OR REPLACE FUNCTION PM_MEDIATOR.DISCOVERY.MODEL()
+RETURNS VARCHAR
+LANGUAGE SQL
+AS ' ''mistral-large2'' ';
 CREATE OR REPLACE PROCEDURE PM_MEDIATOR.DISCOVERY.PROPOSE_FEATURE("P_TOPIC" VARCHAR, "P_ASK" VARCHAR, "P_EVIDENCE" VARCHAR)
 RETURNS VARIANT
 LANGUAGE SQL
@@ -383,13 +444,53 @@ RETURNS VARIANT
 LANGUAGE SQL
 EXECUTE AS OWNER
 AS '
-DECLARE payload STRING; raw STRING; flt STRING;
+DECLARE obj OBJECT; payload STRING; raw STRING;
 BEGIN
-  flt := CASE WHEN COALESCE(:P_TYPE,'''') <> '''' THEN '',"filter":{"@eq":{"ARTIFACT_TYPE":"'' || :P_TYPE || ''"}}'' ELSE '''' END;
-  payload := ''{"query":"'' || REPLACE(REPLACE(:P_QUERY, ''\\\\'', '' ''), ''"'', '''') ||
-             ''","columns":["ARTIFACT_TYPE","TITLE","URL","LINE_START","LINE_END","CONTENT"],"limit":'' || TO_VARCHAR(:P_LIMIT) || flt || ''}'';
+  -- Build the Cortex Search payload with JSON object functions (safe escaping) - never string-concat user text.
+  obj := OBJECT_CONSTRUCT(
+           ''query'', :P_QUERY,
+           ''columns'', ARRAY_CONSTRUCT(''ARTIFACT_TYPE'',''TITLE'',''URL'',''LINE_START'',''LINE_END'',''CONTENT''),
+           ''limit'', :P_LIMIT);
+  IF (COALESCE(:P_TYPE,'''') <> '''') THEN
+    obj := OBJECT_INSERT(:obj, ''filter'', OBJECT_CONSTRUCT(''@eq'', OBJECT_CONSTRUCT(''ARTIFACT_TYPE'', :P_TYPE)), TRUE);
+  END IF;
+  payload := TO_JSON(:obj);
   SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(''PM_MEDIATOR.KNOWLEDGE.KNOWLEDGE_SEARCH'', :payload) INTO :raw;
-  RETURN PARSE_JSON(:raw);
+  RETURN TRY_PARSE_JSON(:raw);
+END;
+';
+CREATE OR REPLACE PROCEDURE PM_MEDIATOR.DISCOVERY.SAVE_DISCOVERY_ARTIFACTS("P_SID" VARCHAR, "P_ARTS" VARIANT)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS '
+BEGIN
+  DELETE FROM PM_MEDIATOR.DISCOVERY.DISCOVERY_ARTIFACT WHERE SESSION_ID=:P_SID;
+  INSERT INTO PM_MEDIATOR.DISCOVERY.DISCOVERY_ARTIFACT (SESSION_ID, ARTIFACT_TYPE, CONTENT, UPDATED_AT)
+    SELECT :P_SID, f.key,
+           CASE WHEN IS_VARCHAR(f.value) THEN f.value::string ELSE TO_JSON(f.value) END,
+           CURRENT_TIMESTAMP()
+    FROM LATERAL FLATTEN(input => :P_ARTS) f;
+  RETURN ''ok'';
+END;
+';
+CREATE OR REPLACE PROCEDURE PM_MEDIATOR.DISCOVERY.SAVE_DISCOVERY_TURN("P_SID" VARCHAR, "P_SEQ" NUMBER(38,0), "P_Q" VARCHAR, "P_A" VARCHAR, "P_STATUS" VARCHAR, "P_CONF" VARCHAR, "P_IDEA" VARCHAR)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS '
+BEGIN
+  IF (:P_SEQ > 0) THEN
+    DELETE FROM PM_MEDIATOR.DISCOVERY.DISCOVERY_TURN WHERE SESSION_ID=:P_SID AND SEQ=:P_SEQ;
+    INSERT INTO PM_MEDIATOR.DISCOVERY.DISCOVERY_TURN (SESSION_ID,SEQ,ROLE,QUESTION,ANSWER)
+    VALUES (:P_SID, :P_SEQ, ''qa'', :P_Q, :P_A);
+  END IF;
+  MERGE INTO PM_MEDIATOR.DISCOVERY.DISCOVERY_SESSION t
+  USING (SELECT :P_SID AS SID) s ON t.SESSION_ID = s.SID
+  WHEN MATCHED THEN UPDATE SET STATUS=:P_STATUS, CONFIDENCE=:P_CONF, UPDATED_AT=CURRENT_TIMESTAMP()
+  WHEN NOT MATCHED THEN INSERT (SESSION_ID, ASK_TEXT, STATUS, CONFIDENCE, CREATED_AT, UPDATED_AT)
+    VALUES (:P_SID, :P_IDEA, :P_STATUS, :P_CONF, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP());
+  RETURN ''ok'';
 END;
 ';
 CREATE OR REPLACE PROCEDURE PM_MEDIATOR.DISCOVERY.SCORE_OPPORTUNITY("P_TOPIC" VARCHAR)

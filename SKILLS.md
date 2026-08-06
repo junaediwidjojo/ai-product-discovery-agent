@@ -7,12 +7,14 @@ Reusable, Snowflake-native skills in `PM_MEDIATOR.DISCOVERY` (DDL: [`sql/06_disc
 ```
 On load:   BUILD_OVERVIEW ─┐            (cached: product overview + focus topics)
            BUILD_TAXONOMY ─┘
-Per turn:  RETRIEVE_EVIDENCE (code-blended) ─┐
-           DATA_SIGNALS (topic-aware) ───────┼─► DISCOVERY_NEXT ─► coverage + confidence
-           transcript ───────────────────────┘                    + next question
-                                                                   + data_insight
-                                                                   + already-exists flag
-Summary:   DISCOVERY_ARTIFACTS ─► business brief ─► (PM approval gate)
+Start:     RETRIEVE_EVIDENCE (adaptive, once) ─┐   DATA_SIGNALS (once per topic) ─┐
+                                                └────────── reused ─────────────┘
+Per turn:  compact state + reused evidence + reused signal ─► DISCOVERY_NEXT_V2 ─► coverage +
+                                                             confidence + next question +
+                                                             data_insight + already-exists
+           (CONTRADICTION_HINT forces the contradiction flag deterministically)
+           SAVE_DISCOVERY_TURN (one MERGE, after reasoning)
+Summary:   DISCOVERY_ARTIFACTS ─► business brief ─► SAVE_DISCOVERY_ARTIFACTS (bulk) ─► (PM approval gate)
 Post-approve: SCORE_RICE ─► GENERATE_PRD ─► CREATE_TASKS (Jira-ready)
 ```
 
@@ -22,9 +24,14 @@ Post-approve: SCORE_RICE ─► GENERATE_PRD ─► CREATE_TASKS (Jira-ready)
 |-------|------|----------|-------------------|
 | `BUILD_OVERVIEW()` | proc | repo/data → neutral product overview (cached in `PRODUCT_PROFILE`) | AISQL + SQL |
 | `BUILD_TAXONOMY()` | proc | repo → 10 business focus areas (cached in `REPO_TAXONOMY`) | AISQL + SQL |
-| `RETRIEVE_EVIDENCE(query, limit, type)` | proc | query → cited code/doc/issue **content** (blended to always include code) | Cortex Search `KNOWLEDGE_SEARCH` |
-| `DATA_SIGNALS(text)` | function | request text → topic-scoped live metrics (accounts / checkout / fulfillment / catalog / returns / general); flags data gaps | SQL over `MOCK` (semantics of `COMMERCE_SV`) |
-| `DISCOVERY_NEXT(transcript, evidence, asked)` | proc | context → `{coverage, confidence, stop, question, why, options, data_insight, already_exists, existing_note, adjustment, detected}` | AISQL `mistral-large2`; calls `DATA_SIGNALS` **internally**; consumes the `RETRIEVE_EVIDENCE` output passed in by the app (does **not** call Cortex Search itself) |
+| `RETRIEVE_EVIDENCE(query, limit, type)` | proc | query → cited code/doc/issue **content** (adaptive: one general search, code search only if needed; payload built with JSON functions) | Cortex Search `KNOWLEDGE_SEARCH` |
+| `DATA_SIGNALS(text)` | function | request text → topic-scoped live metrics (accounts / checkout / fulfillment / catalog / returns / general); flags data gaps. Computed once per topic and reused | SQL over `MOCK` (semantics of `COMMERCE_SV`) |
+| `DISCOVERY_NEXT_V2(state, evidence, signal, asked)` | proc | **interactive path**: compact structured state + reused evidence + pre-computed signal → same JSON as below (smaller prompt, no duplicate `DATA_SIGNALS`) | AISQL via `MODEL()` |
+| `DISCOVERY_NEXT(transcript, evidence, asked)` | proc | context → `{coverage, confidence, stop, question, why, options, data_insight, already_exists, existing_note, adjustment, detected}`; computes `DATA_SIGNALS` internally (used by the controlled tests) | AISQL via `MODEL()` |
+| `CONTRADICTION_HINT(text)` | function | text → deterministic note when frequency/scope/process statements are incompatible; both DISCOVERY_NEXT procs use it to force `adjustment.needed` (reliable, no false positives) | SQL |
+| `SAVE_DISCOVERY_TURN(sid, seq, q, a, status, conf, idea)` | proc | one transaction: idempotent turn insert + `MERGE` session (keeps `CREATED_AT`, sets `UPDATED_AT`) | SQL |
+| `SAVE_DISCOVERY_ARTIFACTS(sid, variant)` | proc | bulk artifact save via `FLATTEN` (one call, not one INSERT per field) | SQL |
+| `MODEL()` | function | single config point for the AI model (currently `mistral-large2`) | SQL |
 | `DISCOVERY_ARTIFACTS(transcript, evidence)` | proc | transcript → PM-ready business brief | AISQL |
 | `SCORE_RICE(topic, discovery_confidence)` | proc | topic → RICE with discovery-aligned confidence + Low/Med/High bands | SQL over `MOCK`+`KNOWLEDGE` |
 | `GENERATE_PRD(session, topic, ctx)` | proc | context → full 13-section, data-grounded PRD (persisted) | AISQL |

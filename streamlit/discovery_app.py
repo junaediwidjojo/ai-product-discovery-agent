@@ -132,7 +132,7 @@ def _search(query_text, limit, atype):
     # Let failures propagate so the orchestrator can surface a grounding error and offer retry.
     data = _j(q("CALL PM_MEDIATOR.DISCOVERY.RETRIEVE_EVIDENCE(?, ?, ?)", [query_text, limit, atype])[0][0])
     out = []
-    for r in (data.get("results") or []):
+    for r in ((data or {}).get("results") or []):
         cite = r.get("TITLE", "")
         if r.get("LINE_START") is not None and str(r.get("LINE_START")) != "":
             cite = f"{r.get('TITLE')}:{r.get('LINE_START')}-{r.get('LINE_END')}"
@@ -141,12 +141,13 @@ def _search(query_text, limit, atype):
     return out
 
 def retrieve_evidence(query_text, limit=6):
-    # always include code files so the agent can read the actual implementation,
-    # then fill with the best general matches (docs / issues / more code)
-    code = _search(query_text, 3, "code_file")
+    # S3 adaptive: one general search first; only run the filtered code search if the
+    # general result lacks code evidence (preserves code grounding, avoids a 2nd call when possible).
     general = _search(query_text, limit, "")
+    has_code = any("CODE" in (e.get("source") or "") for e in general)
+    pool = general if has_code else (_search(query_text, 3, "code_file") + general)
     seen, merged = set(), []
-    for e in code + general:
+    for e in pool:
         k = (e["source"], e["citation"])
         if k in seen:
             continue
@@ -183,6 +184,29 @@ def discovery_next(transcript, ev, asked):
         raise ValueError("discovery_next returned a malformed response")
     return nxt
 
+def build_state(idea, focus, turns, prev):
+    # S5 compact structured state sent to DISCOVERY_NEXT_V2 (not the full growing transcript).
+    prev = prev or {}
+    st_obj = {
+        "idea": idea,
+        "focus": focus or [],
+        "working_problem": prev.get("working_problem", ""),
+        "last_answer": turns[-1]["a"] if turns else "",
+        "answers": [{"q": (t["q"] or "")[:70], "a": (t["a"] or "")[:120]} for t in turns[-4:]],
+        "prev_coverage": prev.get("coverage", {}),
+        "asked": [(t["q"] or "")[:70] for t in turns],
+    }
+    return json.dumps(st_obj, ensure_ascii=False)[:1200]
+
+def discovery_next_v2(state, ev, signal, asked):
+    nxt = _j(q("CALL PM_MEDIATOR.DISCOVERY.DISCOVERY_NEXT_V2(?,?,?,?)", [state, ev, signal, asked])[0][0])
+    if not isinstance(nxt, dict) or not str(nxt.get("question", "")).strip():
+        raise ValueError("discovery_next_v2 returned a malformed response")
+    return nxt
+
+def compute_signal(idea, focus):
+    return q("SELECT PM_MEDIATOR.DISCOVERY.DATA_SIGNALS(?)", [(idea or "") + " " + " ".join(focus or [])])[0][0]
+
 def conf_of(nxt):
     cov = (nxt or {}).get("coverage") or {}
     avg = round(sum(cov.values()) / len(cov)) if cov else 0
@@ -195,20 +219,19 @@ def discovery_artifacts(transcript, ev):
     return a
 
 def save_session(sid, idea, status, confidence):
-    q("DELETE FROM PM_MEDIATOR.DISCOVERY.DISCOVERY_SESSION WHERE SESSION_ID=?", [sid])
-    q("INSERT INTO PM_MEDIATOR.DISCOVERY.DISCOVERY_SESSION (SESSION_ID,ASK_TEXT,STATUS,CONFIDENCE) VALUES (?,?,?,?)",
-      [sid, idea, status, float(confidence or 0)])
+    # MERGE-based (SAVE_DISCOVERY_TURN with seq=0): preserves CREATED_AT, updates UPDATED_AT.
+    q("CALL PM_MEDIATOR.DISCOVERY.SAVE_DISCOVERY_TURN(?,?,?,?,?,?,?)",
+      [sid, 0, "", "", status, str(confidence or 0), idea])
 
-def save_turn(sid, seq, question, answer):
-    q("INSERT INTO PM_MEDIATOR.DISCOVERY.DISCOVERY_TURN (SESSION_ID,SEQ,ROLE,QUESTION,ANSWER) VALUES (?,?,?,?,?)",
-      [sid, seq, "qa", question, answer])
+def save_turn(sid, seq, question, answer, status="in_discovery", confidence=0, idea=""):
+    # One transaction: insert the turn AND update session status/confidence/UPDATED_AT.
+    q("CALL PM_MEDIATOR.DISCOVERY.SAVE_DISCOVERY_TURN(?,?,?,?,?,?,?)",
+      [sid, seq, question, answer, status, str(confidence or 0), idea])
 
 def save_artifacts(sid, artifacts):
-    q("DELETE FROM PM_MEDIATOR.DISCOVERY.DISCOVERY_ARTIFACT WHERE SESSION_ID=?", [sid])
-    for k, v in artifacts.items():
-        content = v if isinstance(v, str) else json.dumps(v)
-        q("INSERT INTO PM_MEDIATOR.DISCOVERY.DISCOVERY_ARTIFACT (SESSION_ID,ARTIFACT_TYPE,CONTENT) VALUES (?,?,?)",
-          [sid, k, content])
+    # Bulk insert via one proc (VARIANT + FLATTEN) instead of one INSERT per artifact.
+    q("CALL PM_MEDIATOR.DISCOVERY.SAVE_DISCOVERY_ARTIFACTS(?, PARSE_JSON(?))",
+      [sid, json.dumps(artifacts or {})])
 
 # ---------- Post-approval artifact helpers (reused) ----------
 def esc(s):
@@ -223,7 +246,10 @@ def hl_md(s):
     return re.sub(r"(\$?\d[\d,]*(?:\.\d+)?%?)", r":blue[**\1**]", str(s))
 
 def score_rice(topic, conf=0):
-    return _j(q("CALL PM_MEDIATOR.DISCOVERY.SCORE_RICE(?,?)", [topic, int(conf or 0)])[0][0])
+    sc = _j(q("CALL PM_MEDIATOR.DISCOVERY.SCORE_RICE(?,?)", [topic, int(conf or 0)])[0][0])
+    if not isinstance(sc, dict) or "rice" not in sc:
+        raise ValueError("score_rice returned an unexpected response")
+    return sc
 
 def _band_color(band, invert=False):
     good = {"Low": "#e5534b", "Med": "#d29922", "High": "#3fb950"}
@@ -403,14 +429,15 @@ def evidence_panel(ss):
 
 def data_panel(ss):
     with st.expander("Live commerce data (SQL)", expanded=False):
-        try:
-            ctx = (ss.get("idea", "") or "") + " " + " ".join(ss.get("focus") or [])
-            sig = q("SELECT PM_MEDIATOR.DISCOVERY.DATA_SIGNALS(?)", [ctx])[0][0]
-        except Exception:
-            sig = ""
-            st.caption("Live metrics are temporarily unavailable.")
+        sig = ss.get("signal", "")
         st.markdown(hl_nums(sig) if sig else "-", unsafe_allow_html=True)
-        st.caption("Computed live via SQL over PM_MEDIATOR.MOCK (modeled by the COMMERCE_SV semantic view). Skill: DATA_SIGNALS().")
+        st.caption("Computed once per topic via SQL over PM_MEDIATOR.MOCK (modeled by COMMERCE_SV). Skill: DATA_SIGNALS().")
+        if st.button("Refresh live data", key="refresh_sig"):
+            try:
+                ss.signal = compute_signal(ss.get("idea", ""), ss.get("focus"))
+            except Exception:
+                st.caption("Refresh failed; keeping the cached signal.")
+            _rerun()
 
 def start_discovery(idea, focus=None):
     ss = st.session_state
@@ -420,19 +447,27 @@ def start_discovery(idea, focus=None):
     ss.turns = []
     ss.asked = 0
     ss.session_id = str(uuid.uuid4())[:12]
-    # Enterprise evidence (Cortex Search) - graceful degradation if it fails
+    q_text = (idea or "") + " " + " ".join(ss.focus)
+    # S8: phase-specific progress instead of one generic spinner.
     try:
-        with st.spinner("Scanning enterprise knowledge for similar initiatives..."):
-            ss.evidence = retrieve_evidence((idea or "") + " " + " ".join(ss.focus))
-        ss.evidence_error = False
-    except Exception:
-        ss.evidence = []
-        ss.evidence_error = True
-    # Discovery kickoff (required) - do not advance to the interview if this fails
-    try:
-        with st.spinner("Preparing the discovery interview..."):
-            nxt = discovery_next(transcript_str(idea, ss.turns), evidence_str(ss.evidence), 0)
-    except Exception:
+        with st.status("Starting discovery...", expanded=True) as status:
+            status.update(label="Retrieving code & docs evidence (Cortex Search)...")
+            try:
+                ss.evidence = retrieve_evidence(q_text)
+                ss.evidence_error = False
+            except Exception:
+                ss.evidence = []
+                ss.evidence_error = True
+            status.update(label="Checking live commerce data...")
+            try:
+                ss.signal = compute_signal(idea, ss.focus)  # S2: computed ONCE, reused all session
+            except Exception:
+                ss.signal = ""
+            status.update(label="Selecting the first question...")
+            nxt = discovery_next_v2(build_state(idea, ss.focus, [], {}), evidence_str(ss.evidence), ss.signal, 0)
+            status.update(label="Ready", state="complete")
+    except Exception as e:
+        print(f"[nomy] start_discovery failed: {e!r}")  # detailed error to logs; safe message to UI
         ss.start_error = True
         return
     ss.next = nxt
@@ -451,18 +486,18 @@ def submit_answer(answer):
     question = (ss.get("next") or {}).get("question", "")
     ss.turns.append({"q": question, "a": answer})
     ss.asked += 1
-    try:
-        save_turn(ss.session_id, ss.asked, question, answer)
-    except Exception:
-        ss.persist_warn = True
-    ss.pending = True  # process on next render -> smoother transition
+    # persistence is deferred to process_pending (after reasoning) so the user isn't
+    # blocked by a DB write before the next AI question; the answer is safe in memory.
+    ss.pending = True
 
 def process_pending():
     ss = st.session_state
-    tr = transcript_str(ss.idea, ss.turns)
+    prev = ss.get("next") or {}
     try:
-        nxt = discovery_next(tr, evidence_str(ss.evidence), ss.asked)
-    except Exception:
+        nxt = discovery_next_v2(build_state(ss.idea, ss.get("focus"), ss.turns, prev),
+                                evidence_str(ss.evidence), ss.get("signal", ""), ss.asked)
+    except Exception as e:
+        print(f"[nomy] next-question failed: {e!r}")
         ss.next_error = True
         ss.pending = False
         return
@@ -470,8 +505,10 @@ def process_pending():
     ss.next_error = False
     ss.coverage = nxt.get("coverage", ss.coverage)
     ss.confidence = conf_of(nxt)
+    # persist the just-answered turn + session update in ONE call, AFTER reasoning
     try:
-        save_session(ss.session_id, ss.idea, "in_discovery", ss.confidence)
+        last = ss.turns[-1] if ss.turns else {"q": "", "a": ""}
+        save_turn(ss.session_id, ss.asked, last["q"], last["a"], "in_discovery", ss.confidence, ss.idea)
     except Exception:
         ss.persist_warn = True
     ss.pending = False
@@ -484,7 +521,8 @@ def build_summary():
     try:
         with st.spinner("Synthesizing the discovery brief..."):
             ss.artifacts = discovery_artifacts(tr, evidence_str(ss.evidence))
-    except Exception:
+    except Exception as e:
+        print(f"[nomy] summary failed: {e!r}")
         ss.summary_error = True
         return
     ss.summary_error = False
