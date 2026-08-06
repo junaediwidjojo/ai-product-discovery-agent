@@ -1,77 +1,82 @@
 ---
 name: product-discovery
 description: >
-  AI Product Discovery Agent skill. Turns a plain business request (e.g. "I want refunds")
-  into an evidence-grounded recommendation, PRD, existing-vs-proposed wireframe, and engineering
-  tasks by ORCHESTRATING Snowflake-native tools and other CoCo skills. Use when a business
-  stakeholder wants to explore, quantify, or scope a product/feature idea against real enterprise
-  data, code, docs, and community signal. Triggers: "should we build", "is it worth improving",
-  "I want <feature>", "scope this idea", "product discovery", "PM mediator".
+  Nomy Explores - AI Product Discovery Facilitator. Turns a plain business problem
+  (e.g. "customers can't self-serve returns from the order page") into an evidence-grounded
+  discovery brief, RICE score, PRD, and Jira-ready engineering tickets by running the
+  interview a Senior PM would - grounded in real code, docs, and live commerce data - then
+  gating downstream artifacts behind an explicit PM approval. Use when a business stakeholder
+  wants to explore or scope a product/feature idea against real enterprise data, code, and docs.
+  Triggers: "should we build", "is it worth improving", "scope this idea", "product discovery",
+  "discovery interview", "PM facilitator".
 ---
 
-# Product Discovery Agent
+# Nomy Explores - Product Discovery Facilitator
 
 ## Purpose
-Act as a Product Manager mediator between business stakeholders and engineering. Instead of
-jumping to a PRD, first REASON across enterprise knowledge (data + code + docs + community),
-quantify impact, score the opportunity, ask a clarifying question when needed, then produce
-engineering-ready artifacts with a citation for every claim.
+Act as a Senior-PM facilitator between business stakeholders and engineering. Instead of
+jumping to a PRD, first understand the real PROBLEM by interviewing the stakeholder one
+question at a time - every question grounded in three sources at once (the real codebase &
+docs, live commerce data, and the running transcript) - then synthesize a PM-ready brief and,
+only after PM approval, produce a RICE score, PRD, and engineering tickets.
 
-This skill is an ORCHESTRATOR: it composes other skills and native Snowflake objects rather
-than being one giant prompt.
+This skill is an ORCHESTRATOR: the Streamlit app composes Snowflake-native skills; there is
+no single giant prompt.
 
 ## Snowflake objects it uses (built in this project)
-- Semantic view `PM_MEDIATOR.MOCK.COMMERCE_SV` (Cortex Analyst) - impact quantification.
-- Cortex Search `PM_MEDIATOR.KNOWLEDGE.KNOWLEDGE_SEARCH` - unified retrieval over code/docs/community/db,
+- Semantic view `PM_MEDIATOR.MOCK.COMMERCE_SV` (Cortex Analyst) - the model behind live metrics.
+- Cortex Search `PM_MEDIATOR.KNOWLEDGE.KNOWLEDGE_SEARCH` - unified retrieval over code/docs/issues,
   filterable by `ARTIFACT_TYPE`.
 - Knowledge graph `PM_MEDIATOR.KNOWLEDGE.*` - normalized artifacts, chunks, links, concept bridge.
-- Action procedures in `PM_MEDIATOR.DISCOVERY`:
-  `SCORE_OPPORTUNITY(topic)`, `GENERATE_PRD(session,topic,evidence)`,
-  `GENERATE_WIREFRAME(topic,existing,proposed)`, `CREATE_TASKS(session,prd)`.
-- Native agent `PM_MEDIATOR.DISCOVERY.PRODUCT_DISCOVERY_AGENT`.
-- App `PM_MEDIATOR.DISCOVERY.DISCOVERY_WORKBENCH` (Streamlit in Snowflake).
+- Skills in `PM_MEDIATOR.DISCOVERY`:
+  `RETRIEVE_EVIDENCE`, `DATA_SIGNALS`, `DISCOVERY_NEXT_V2` (interactive) / `DISCOVERY_NEXT`,
+  `CONTRADICTION_HINT`, `DISCOVERY_ARTIFACTS`, `SCORE_RICE`, `GENERATE_PRD`, `CREATE_TASKS`,
+  `SAVE_DISCOVERY_TURN`, `SAVE_DISCOVERY_ARTIFACTS`, `MODEL` (single model config point).
+- Native agent `PM_MEDIATOR.DISCOVERY.PRODUCT_DISCOVERY_AGENT` (commerce Q&A + enterprise search).
+- App `PM_MEDIATOR.DISCOVERY.DISCOVERY_WORKBENCH` (Streamlit in Snowflake) - the runtime orchestrator.
 
 ## Skill orchestration (composes, does not duplicate)
-- `semantic-view` skill - build/audit/evaluate `COMMERCE_SV`.
-- `search-optimization` skill - build/refresh the Cortex Search services.
-- `cortex-agent` skill - create/evaluate `PRODUCT_DISCOVERY_AGENT`.
+- `semantic-view` - build/audit/evaluate `COMMERCE_SV`.
+- `search-optimization` - build/refresh the Cortex Search service.
+- `cortex-agent` - create/evaluate `PRODUCT_DISCOVERY_AGENT`.
 - `developing-with-streamlit-in-snowflake` - iterate the Workbench UI.
 
 ## Inputs
-- `ask` (string, required): the business request in plain language.
-- `clarification` (string, optional): the human's answer to a clarifying question.
+- `idea` (string, required): the business problem/idea in plain language.
+- `focus` (string[], optional): business focus areas (context only - steer, not the request).
 
 ## Outputs
-- Opportunity score (0-10) with impact/demand/effort breakdown.
-- Evidence ledger rows (`DISCOVERY.EVIDENCE`) with citations.
-- Impact metrics (`DISCOVERY.IMPACT`).
-- Grounded PRD (`DISCOVERY.PRD` + optional `@ARTIFACTS`).
-- Existing-vs-proposed wireframe (HTML).
-- Engineering tasks (`DISCOVERY.TASK`), Approve -> status='approved'.
+- A running Discovery Confidence + per-dimension coverage (8 dimensions).
+- Evidence panel (code / docs / issues), each cited; live commerce data (SQL) panel.
+- Discovery brief (`DISCOVERY_ARTIFACTS`), persisted to `DISCOVERY.DISCOVERY_ARTIFACT`.
+- RICE score (`SCORE_RICE`, discovery-aligned confidence + bands).
+- Grounded PRD (`DISCOVERY.PRD`), and Jira-ready tickets (`DISCOVERY.TASK`) - the Jira board is a
+  labeled demo, not a real API call.
 
-## Reasoning process (the 7 steps)
-1. Interpret intent -> map `ask` to a concept (return/refund/order/...). Tool: `AI_COMPLETE`.
-2. Quantify impact -> Cortex Analyst over `COMMERCE_SV` (return rate, $ by reason, trend). Why: turns
-   a fuzzy ask into defensible numbers; the SQL is kept as provenance.
-3. Gather evidence -> `KNOWLEDGE_SEARCH` filtered per source (code_file / doc_page / issue). Why: pairs
-   "how it works today" (code), "how it should work" (docs), "what users hit" (community), all cited.
-4. Decide clarification (human-in-the-loop) -> `AI_COMPLETE` judges if one question would materially
-   scope the solution; if so, ASK the human via the app and wait. Why: agentic, avoids guessing.
-5. Score opportunity -> `SCORE_OPPORTUNITY` = 0.5*impact + 0.4*demand + 0.1*(10-effort). Why: transparent,
-   auditable reasoning, not a black-box verdict.
-6. Generate artifacts -> `GENERATE_PRD` (grounded, cited) and `GENERATE_WIREFRAME` (existing side derived
-   from real code). Why: engineering-ready output, evidence-backed even in the mockup.
-7. Create tasks -> `CREATE_TASKS` splits the PRD into tickets; human clicks Approve to persist. Why:
-   the agent performs an ACTION, not just an answer.
+## Flow
+1. On load: `BUILD_OVERVIEW` + `BUILD_TAXONOMY` (cached) give the product overview and focus chips.
+2. Start: retrieve evidence ONCE (`RETRIEVE_EVIDENCE`, adaptive) and compute `DATA_SIGNALS` ONCE per
+   topic; both are reused for the rest of the session.
+3. Per turn: send a compact structured state + reused evidence + reused signal to `DISCOVERY_NEXT_V2`,
+   which returns the next question, declarative answer options, per-dimension coverage, a live-data
+   insight, and an already-exists flag. `CONTRADICTION_HINT` deterministically flags incompatible
+   answers (frequency/scope/process). Read the current workflow from the code; never ask how the
+   system works. Persist the turn via `SAVE_DISCOVERY_TURN` (one MERGE, after reasoning).
+4. Existing capability detected -> investigate the remaining gap (discoverability, correctness,
+   workflow fit, eligibility, adoption); recommend no new build only if the stakeholder confirms the
+   current capability fully covers the need.
+5. Summary: `DISCOVERY_ARTIFACTS` synthesizes the PM-ready brief -> PM review + approval gate.
+6. Post-approval: `SCORE_RICE` -> `GENERATE_PRD` -> `CREATE_TASKS` (persisted, Jira-ready).
 
-## Example invocation
-Business user (in the Workbench): "I want refunds."
--> topic=refund; impact: 12% return rate on 1200 orders, top reason "Size too small" ($8.3K);
-   evidence: help/index.tsx:13 (no self-serve returns), docs "Create Order Returns in the Storefront",
-   6 community refund bugs; clarifying Q: "all reasons or sizing-first?"; score 8.x/10;
-   PRD + wireframe + 7 tasks; Approve -> tasks persisted with provenance.
+## Grounding rules
+- Never invent metrics; put a real figure from `DATA_SIGNALS` in every turn, and state a DATA GAP
+  explicitly when the dataset can't measure something (e.g. cart abandonment).
+- Only mention returns/refunds when the topic is returns/refunds/exchanges.
+- Options are short declarative ANSWERS, not more questions; never repeat an answered question.
 
 ## Error handling
-- No data for a topic -> report "insufficient data", lower confidence, still surface docs/community.
-- Model/JSON quirks -> strip code fences before `TRY_PARSE_JSON` (AISQL wraps JSON in fences).
-- Region -> reasoning standardized on `mistral-large2` (Claude unavailable in AWS_AP_SOUTHEAST_3).
+- Model/JSON quirks -> `REGEXP_SUBSTR` + `TRY_PARSE_JSON` (AISQL may wrap JSON in fences).
+- Cortex Search or a skill fails -> the app shows a safe message and offers retry; it never advances a
+  phase whose required output failed, and keeps the session in memory if persistence is down.
+- Region/model -> centralized in `MODEL()` (currently `mistral-large2`; Claude / haiku unavailable in
+  AWS_AP_SOUTHEAST_3, and a faster small model failed the quality gate - see EVAL.md).
